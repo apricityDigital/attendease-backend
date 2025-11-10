@@ -17,6 +17,7 @@ app.use(
   cors({
     origin: [
       "http://localhost:3000",
+      "http://localhost:3002",
       "http://192.168.29.213:3000",
       "http://192.168.29.213:61960",
       "https://d30v7d7vnspm71.cloudfront.net", // CloudFront

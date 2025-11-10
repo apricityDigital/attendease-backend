@@ -1,22 +1,44 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
+const authenticate = require("../middleware/authMiddleware");
+const {
+  authorize,
+  getPermissionCityFilter,
+} = require("../middleware/permissionMiddleware");
 
 // 🟢 Fetch all cities
-router.get("/", async (req, res) => {
+router.get(
+  "/",
+  authenticate,
+  authorize("city", "view"),
+  async (req, res) => {
   try {
     const result = await pool.query(
       "SELECT * FROM public.cities ORDER BY city_id ASC"
     );
-    res.json(result.rows);
+    const allowedCities = getPermissionCityFilter(req, "city", "view");
+    let rows = result.rows;
+    if (Array.isArray(allowedCities) && allowedCities.length > 0) {
+      const allowedSet = new Set(
+        allowedCities.map((cityId) => Number(cityId))
+      );
+      rows = rows.filter((row) => allowedSet.has(Number(row.city_id)));
+    }
+    res.json(rows);
   } catch (error) {
     console.error("Error fetching cities:", error);
     res.status(500).json({ error: "Database error" });
   }
-});
+  }
+);
 
 // 🟢 Add a new city
-router.post("/", async (req, res) => {
+router.post(
+  "/",
+  authenticate,
+  authorize("city", "manage"),
+  async (req, res) => {
   const { city_name, state } = req.body;
   if (!city_name || !state) {
     return res.status(400).json({ error: "City name and state are required" });
@@ -31,10 +53,15 @@ router.post("/", async (req, res) => {
     console.error("Error adding city:", error);
     res.status(500).json({ error: "Database error" });
   }
-});
+  }
+);
 
 // 🟢 Update a city
-router.put("/:id", async (req, res) => {
+router.put(
+  "/:id",
+  authenticate,
+  authorize("city", "manage"),
+  async (req, res) => {
   const { id } = req.params;
   const { city_name, state } = req.body;
   if (!city_name || !state) {
@@ -53,10 +80,15 @@ router.put("/:id", async (req, res) => {
     console.error("Error updating city:", error);
     res.status(500).json({ error: "Database error" });
   }
-});
+  }
+);
 
 // 🟢 Delete a city
-router.delete("/:id", async (req, res) => {
+router.delete(
+  "/:id",
+  authenticate,
+  authorize("city", "manage"),
+  async (req, res) => {
   const { id } = req.params;
   try {
     const result = await pool.query(
@@ -71,6 +103,7 @@ router.delete("/:id", async (req, res) => {
     console.error("Error deleting city:", error);
     res.status(500).json({ error: "Database error" });
   }
-});
+  }
+);
 
 module.exports = router;

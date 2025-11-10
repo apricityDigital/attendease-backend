@@ -1,5 +1,8 @@
 const express = require("express");
 const router = express.Router();
+const axios = require("axios");
+const path = require("path");
+const { Readable } = require("stream");
 const {
   rekognition,
   s3,
@@ -7,12 +10,19 @@ const {
   CreateCollectionCommand,
   DeleteFacesCommand,
   DeleteObjectCommand,
+  GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
 } = require("../../config/awsConfig");
 const pool = require("../../config/db");
 const upload = require("../../middleware/upload");
 const { buildPublicFaceUrl, parseFaceKey } = require("../../utils/faceImage");
+const {
+  hasBackblazeCredentials,
+  isBackblazeUrl,
+  parseBackblazeUrl,
+  fetchBackblazeStream,
+} = require("../../utils/backblaze");
 
 const bucketName =
   process.env.AWS_S3_BUCKET || process.env.S3_BUCKET_NAME || null;
@@ -38,6 +48,99 @@ const normalizeId = (value) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 };
+
+const resolveSupervisorIdFromQuery = (query = {}) => {
+  const keys = ["supervisor_id", "supervisorId", "user_id", "userId"];
+  for (const key of keys) {
+    const candidate = normalizeId(query?.[key]);
+    if (candidate !== null) {
+      return candidate;
+    }
+  }
+  return null;
+};
+
+const buildFaceImageUrlFromEmbedding = (embedding, empId) => {
+  if (!embedding) {
+    return null;
+  }
+
+  let faceImageUrl = buildPublicFaceUrl(embedding);
+  if (!faceImageUrl && isBackblazeUrl(embedding) && empId) {
+    faceImageUrl = `app/attendance/employee/faceRoutes/image/${empId}`;
+  } else if (!faceImageUrl && typeof embedding === "string") {
+    faceImageUrl = embedding;
+  }
+
+  return faceImageUrl;
+};
+
+async function fetchSupervisorFaceGallery(supervisorId, wardId) {
+  const { rows } = await pool.query(
+    `
+      SELECT DISTINCT ON (e.emp_id)
+             e.emp_id,
+             e.emp_code,
+             e.name AS employee_name,
+             e.face_embedding,
+             e.face_id,
+             e.face_confidence,
+             w.ward_id,
+             w.ward_name,
+             z.zone_name,
+             c.city_name
+        FROM employee e
+        JOIN supervisor_ward sw ON sw.ward_id = e.ward_id
+        LEFT JOIN wards w ON e.ward_id = w.ward_id
+        LEFT JOIN zones z ON w.zone_id = z.zone_id
+        LEFT JOIN cities c ON z.city_id = c.city_id
+       WHERE sw.supervisor_id = $1
+         AND ($2::int IS NULL OR w.ward_id = $2::int)
+         AND (e.face_embedding IS NOT NULL OR e.face_id IS NOT NULL)
+       ORDER BY e.emp_id
+    `,
+    [supervisorId, wardId]
+  );
+
+  const uniqueMap = new Map();
+
+  rows.forEach((row) => {
+    const key = String(row.emp_id);
+    if (uniqueMap.has(key)) {
+      return;
+    }
+
+    const url = buildFaceImageUrlFromEmbedding(row.face_embedding, row.emp_id);
+
+    uniqueMap.set(key, {
+      employeeId: row.emp_id,
+      employee_id: row.emp_id,
+      empId: row.emp_id,
+      emp_id: row.emp_id,
+      employeeName: row.employee_name,
+      name: row.employee_name,
+      employeeCode: row.emp_code,
+      emp_code: row.emp_code,
+      code: row.emp_code,
+      identifier: row.emp_code || String(row.emp_id),
+      wardId: row.ward_id,
+      ward_id: row.ward_id,
+      wardName: row.ward_name,
+      zoneName: row.zone_name,
+      cityName: row.city_name,
+      faceId: row.face_id,
+      face_id: row.face_id,
+      faceConfidence: row.face_confidence,
+      face_confidence: row.face_confidence,
+      key: row.face_embedding,
+      imageKey: row.face_embedding,
+      url,
+      source: "supervisor",
+    });
+  });
+
+  return Array.from(uniqueMap.values());
+}
 
 const resolveCollectionId = () => {
   const id =
@@ -105,7 +208,51 @@ const parseEmployeeId = (identifier) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+const streamS3Object = async (key) => {
+  if (!bucketName) {
+    throw new Error("S3 bucket is not configured");
+  }
+
+  const command = new GetObjectCommand({
+    Bucket: bucketName,
+    Key: key,
+  });
+
+  const response = await s3.send(command);
+  const body = response.Body;
+  const stream =
+    typeof body?.pipe === "function" ? body : Readable.from(body ?? []);
+
+  return {
+    stream,
+    contentType: response.ContentType || "image/jpeg",
+  };
+};
+
 router.get("/gallery", async (req, res) => {
+  const supervisorId = resolveSupervisorIdFromQuery(req.query);
+  const wardId = normalizeId(req.query?.ward_id ?? req.query?.wardId ?? null);
+
+  if (supervisorId !== null) {
+    try {
+      const data = await fetchSupervisorFaceGallery(supervisorId, wardId);
+      return res.json({
+        success: true,
+        scope: "supervisor",
+        supervisor_id: supervisorId,
+        ward_id: wardId,
+        count: data.length,
+        data,
+      });
+    } catch (error) {
+      console.error("Supervisor face gallery fetch error:", error);
+      return res.status(500).json({
+        error: "Unable to fetch supervisor face gallery",
+        details: error.message,
+      });
+    }
+  }
+
   if (!bucketName) {
     return res.status(500).json({
       error: "S3 bucket is not configured",
@@ -157,12 +304,37 @@ router.get("/gallery", async (req, res) => {
         : undefined;
     } while (continuationToken);
 
+    const dedupMap = new Map();
+    images.forEach((item) => {
+      const identifier =
+        item.employeeId !== null && item.employeeId !== undefined
+          ? String(item.employeeId)
+          : item.identifier
+          ? String(item.identifier)
+          : item.key;
+      const dedupKey = identifier ? identifier.toLowerCase() : item.key;
+      const existing = dedupMap.get(dedupKey);
+
+      const currentTimestamp = item.lastModified
+        ? new Date(item.lastModified).getTime()
+        : 0;
+      const existingTimestamp = existing?.lastModified
+        ? new Date(existing.lastModified).getTime()
+        : -Infinity;
+
+      if (!existing || currentTimestamp > existingTimestamp) {
+        dedupMap.set(dedupKey, item);
+      }
+    });
+
+    const uniqueImages = Array.from(dedupMap.values());
+
     res.json({
       success: true,
       bucket: bucketName,
       prefix,
-      count: images.length,
-      images,
+      count: uniqueImages.length,
+      images: uniqueImages,
     });
   } catch (error) {
     console.error("Face gallery fetch error:", error);
@@ -170,6 +342,136 @@ router.get("/gallery", async (req, res) => {
       error: "Unable to list face images",
       details: error.message,
     });
+  }
+});
+
+router.get("/image/:employeeId", async (req, res) => {
+  try {
+    const employeeId = normalizeId(req.params.employeeId);
+
+    if (employeeId === null) {
+      return res.status(400).json({ error: "Valid employee ID is required" });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT face_embedding
+         FROM employee
+         WHERE emp_id = $1`,
+      [employeeId]
+    );
+
+    if (!rows.length || !rows[0].face_embedding) {
+      return res.status(404).json({ error: "Face image not stored for this employee" });
+    }
+
+    const faceEmbedding = rows[0].face_embedding;
+    const defaultName = `employee_${employeeId}_face.jpg`;
+
+    if (isBackblazeUrl(faceEmbedding)) {
+      const reference = parseBackblazeUrl(faceEmbedding);
+      if (!reference?.bucket || !reference?.key) {
+        return res.status(404).json({ error: "Face image not found" });
+      }
+
+      if (hasBackblazeCredentials()) {
+        try {
+          const { stream, contentType } = await fetchBackblazeStream(
+            reference.bucket,
+            reference.key
+          );
+
+          res.set({
+            "Content-Type": contentType,
+            "Content-Disposition": `inline; filename="${path.basename(reference.key) || defaultName}"`,
+          });
+
+          return stream.pipe(res);
+        } catch (error) {
+          if (error?.response?.status === 404) {
+            return res.status(404).json({ error: "Face image not found" });
+          }
+          console.warn(
+            "Backblaze credentialed fetch failed, attempting unauthenticated fallback.",
+            error?.message || error
+          );
+        }
+      } else {
+        console.warn(
+          "Backblaze credentials not configured; falling back to public download for face image."
+        );
+      }
+
+      try {
+        const imageResponse = await axios.get(faceEmbedding, {
+          responseType: "stream",
+        });
+
+        res.set({
+          "Content-Type":
+            imageResponse.headers["content-type"] || "image/jpeg",
+          "Content-Disposition": `inline; filename="${path.basename(reference.key) || defaultName}"`,
+        });
+
+        return imageResponse.data.pipe(res);
+      } catch (error) {
+        console.error("Error proxying Backblaze face image:", error);
+        return res.status(502).json({
+          error: "Unable to fetch face image from Backblaze",
+          details: error?.message || "Backblaze request failed",
+        });
+      }
+    }
+
+    const objectKey = parseFaceKey(faceEmbedding);
+    if (objectKey) {
+      try {
+        const { stream, contentType } = await streamS3Object(objectKey);
+
+        res.set({
+          "Content-Type": contentType,
+          "Content-Disposition": `inline; filename="${path.basename(objectKey) || defaultName}"`,
+        });
+
+        return stream.pipe(res);
+      } catch (error) {
+        if (error?.$metadata?.httpStatusCode === 404) {
+          return res.status(404).json({ error: "Face image not found" });
+        }
+
+        console.error("Error streaming S3 face image:", error);
+        return res.status(500).json({
+          error: "Unable to fetch face image from S3",
+          details: error?.message || "S3 request failed",
+        });
+      }
+    }
+
+    if (typeof faceEmbedding === "string" && faceEmbedding.startsWith("http")) {
+      try {
+        const imageResponse = await axios.get(faceEmbedding, {
+          responseType: "stream",
+        });
+
+        res.set({
+          "Content-Type":
+            imageResponse.headers["content-type"] || "image/jpeg",
+          "Content-Disposition": `inline; filename="${defaultName}"`,
+        });
+
+        return imageResponse.data.pipe(res);
+      } catch (error) {
+        console.error("Error proxying face image URL:", error);
+        return res.status(500).json({
+          error: "Unable to fetch face image",
+          details: error?.message || "Remote request failed",
+        });
+      }
+    }
+
+    return res.status(404).json({ error: "Face image not found" });
+  } catch (error) {
+    console.error("Face image streaming error:", error);
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
@@ -395,6 +697,11 @@ router.get("/:employeeId", async (req, res) => {
       s3ObjectExists = false;
     }
 
+    let imageUrl = buildPublicFaceUrl(record.face_embedding);
+    if (!imageUrl && isBackblazeUrl(record.face_embedding)) {
+      imageUrl = `app/attendance/employee/faceRoutes/image/${record.emp_id}`;
+    }
+
     return res.json({
       success: true,
       face: {
@@ -402,7 +709,7 @@ router.get("/:employeeId", async (req, res) => {
         employeeCode: record.emp_code,
         employeeName: record.name,
         key: record.face_embedding,
-        imageUrl: buildPublicFaceUrl(record.face_embedding),
+        imageUrl,
         confidence: record.face_confidence,
         faceId: record.face_id,
         s3ObjectExists,

@@ -1,6 +1,8 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
+const authenticate = require("../middleware/authMiddleware");
+const { authorize } = require("../middleware/permissionMiddleware");
 
 // Get all wards with zone names
 // router.get("/", async (req, res) => {
@@ -21,7 +23,11 @@ const pool = require("../config/db");
 //   }
 // });
 
-router.get("/", async (req, res) => {
+router.get(
+  "/",
+  authenticate,
+  authorize("master", "view"),
+  async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT w.ward_id, w.ward_name, z.zone_id, 
@@ -70,7 +76,8 @@ router.get("/", async (req, res) => {
     console.error("Error fetching wards:", error);
     res.status(500).json({ error: "Internal Server Error" });
   }
-});
+  }
+);
 
 // Get a specific ward by ID
 router.get("/:id", async (req, res) => {
@@ -94,7 +101,11 @@ router.get("/:id", async (req, res) => {
 });
 
 // Create a new ward
-router.post("/", async (req, res) => {
+router.post(
+  "/",
+  authenticate,
+  authorize("master", "manage"),
+  async (req, res) => {
   const { ward_name, zone_id } = req.body;
   if (!ward_name || !zone_id) {
     return res
@@ -119,10 +130,15 @@ router.post("/", async (req, res) => {
     }
     res.status(500).json({ error: "Internal Server Error" });
   }
-});
+  }
+);
 
 // Update a ward
-router.put("/:id", async (req, res) => {
+router.put(
+  "/:id",
+  authenticate,
+  authorize("master", "manage"),
+  async (req, res) => {
   const { id } = req.params;
   const { ward_name, zone_id } = req.body;
 
@@ -141,10 +157,15 @@ router.put("/:id", async (req, res) => {
     console.error("Error updating ward:", error);
     res.status(500).json({ error: "Internal Server Error" });
   }
-});
+  }
+);
 
 // Delete a ward
-router.delete("/:id", async (req, res) => {
+router.delete(
+  "/:id",
+  authenticate,
+  authorize("master", "manage"),
+  async (req, res) => {
   const { id } = req.params;
 
   try {
@@ -160,6 +181,7 @@ router.delete("/:id", async (req, res) => {
     console.error("Error deleting ward:", error);
     res.status(500).json({ error: "Internal Server Error" });
   }
-});
+  }
+);
 
 module.exports = router;

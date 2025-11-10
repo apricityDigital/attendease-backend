@@ -3,6 +3,77 @@ const router = express.Router();
 const pool = require("../../config/db");
 const authenticate = require("../../middleware/authenticate");
 const { buildPublicFaceUrl } = require("../../utils/faceImage");
+const { isBackblazeUrl } = require("../../utils/backblaze");
+
+const normalizeUserIdInput = (value) => {
+  if (value === undefined || value === null) {
+    return { userId: null, valid: true };
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return { userId: null, valid: true };
+    }
+
+    if (trimmed.toUpperCase() === "ALL") {
+      return { userId: null, valid: true };
+    }
+
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed)) {
+      return { userId: parsed, valid: true };
+    }
+
+    return { userId: null, valid: false };
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return { userId: value, valid: true };
+  }
+
+  const parsed = Number(value);
+  if (Number.isFinite(parsed)) {
+    return { userId: parsed, valid: true };
+  }
+
+  return { userId: null, valid: false };
+};
+
+const normalizeCityIdInput = (value) => {
+  if (value === undefined || value === null || value === "") {
+    return { cityId: null, valid: true };
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return { cityId: null, valid: true };
+    }
+
+    if (trimmed.toUpperCase() === "ALL") {
+      return { cityId: null, valid: true };
+    }
+
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed)) {
+      return { cityId: parsed, valid: true };
+    }
+
+    return { cityId: null, valid: false };
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return { cityId: value, valid: true };
+  }
+
+  const parsed = Number(value);
+  if (Number.isFinite(parsed)) {
+    return { cityId: parsed, valid: true };
+  }
+
+  return { cityId: null, valid: false };
+};
 
 const resolveDateRange = (rawStart, rawEnd) => {
   const todayIso = new Date().toISOString().split("T")[0];
@@ -58,7 +129,12 @@ const mapRowsToWards = (rows) => {
       };
     }
 
-    const faceImageUrl = buildPublicFaceUrl(row.face_embedding);
+    let faceImageUrl = buildPublicFaceUrl(row.face_embedding);
+    if (!faceImageUrl && isBackblazeUrl(row.face_embedding)) {
+      faceImageUrl = `app/attendance/employee/faceRoutes/image/${row.emp_id}`;
+    } else if (!faceImageUrl && typeof row.face_embedding === "string") {
+      faceImageUrl = row.face_embedding;
+    }
     const faceEnrolled = Boolean(row.face_embedding);
     const faceConfidence =
       row.face_confidence !== undefined && row.face_confidence !== null
@@ -110,13 +186,17 @@ const mapRowsToWards = (rows) => {
   return Object.values(wardMap);
 };
 
-const fetchSupervisorSummary = async (userId, startDate, endDate) => {
+const fetchSupervisorSummary = async (userId, cityId, startDate, endDate) => {
   const summaryQuery = `
     WITH assigned_employees AS (
-      SELECT e.emp_id
+      SELECT DISTINCT e.emp_id
       FROM employee e
-      JOIN supervisor_ward sw ON e.ward_id = sw.ward_id
-      WHERE sw.supervisor_id = $1
+      LEFT JOIN wards w ON e.ward_id = w.ward_id
+      LEFT JOIN zones z ON w.zone_id = z.zone_id
+      LEFT JOIN cities c ON z.city_id = c.city_id
+      LEFT JOIN supervisor_ward sw ON e.ward_id = sw.ward_id
+      WHERE ($1::int IS NULL OR sw.supervisor_id = $1::int)
+        AND ($4::int IS NULL OR c.city_id = $4::int)
     ),
     attendance_status AS (
       SELECT
@@ -141,7 +221,12 @@ const fetchSupervisorSummary = async (userId, startDate, endDate) => {
     FROM attendance_status
   `;
 
-  const result = await pool.query(summaryQuery, [userId, startDate, endDate]);
+  const result = await pool.query(summaryQuery, [
+    userId ?? null,
+    startDate,
+    endDate,
+    cityId ?? null,
+  ]);
   const summary = result.rows[0] || {};
 
   const totalEmployees = Number(summary.total_employees) || 0;
@@ -162,7 +247,7 @@ const fetchSupervisorSummary = async (userId, startDate, endDate) => {
   };
 };
 
-const fetchSupervisorEmployees = async (userId, startDate, endDate) => {
+const fetchSupervisorEmployees = async (userId, cityId, startDate, endDate) => {
   const query = `
     SELECT
       e.emp_id,
@@ -202,8 +287,8 @@ const fetchSupervisorEmployees = async (userId, startDate, endDate) => {
     JOIN wards w ON e.ward_id = w.ward_id
     JOIN zones z ON w.zone_id = z.zone_id
     JOIN cities c ON z.city_id = c.city_id
-    JOIN supervisor_ward sw ON w.ward_id = sw.ward_id
-    JOIN users u ON sw.supervisor_id = u.user_id
+    LEFT JOIN supervisor_ward sw ON w.ward_id = sw.ward_id
+    LEFT JOIN users u ON sw.supervisor_id = u.user_id
     JOIN designation d ON e.designation_id = d.designation_id
     JOIN department dept ON d.department_id = dept.department_id
     LEFT JOIN (
@@ -246,26 +331,101 @@ const fetchSupervisorEmployees = async (userId, startDate, endDate) => {
       WHERE a.date::date BETWEEN $2::date AND $3::date
       GROUP BY a.emp_id
     ) summary ON summary.emp_id = e.emp_id
-    WHERE u.user_id = $1
+    WHERE ($1::int IS NULL OR u.user_id = $1::int)
+      AND ($4::int IS NULL OR c.city_id = $4::int)
     ORDER BY w.ward_id, e.name;
   `;
 
-  const result = await pool.query(query, [userId, startDate, endDate]);
+  const result = await pool.query(query, [
+    userId ?? null,
+    startDate,
+    endDate,
+    cityId ?? null,
+  ]);
   return mapRowsToWards(result.rows);
+};
+
+const fetchCitySummary = async (userId, cityId, startDate, endDate) => {
+  const query = `
+    WITH employee_city AS (
+      SELECT DISTINCT
+        e.emp_id,
+        c.city_id,
+        c.city_name
+      FROM employee e
+      JOIN wards w ON e.ward_id = w.ward_id
+      JOIN zones z ON w.zone_id = z.zone_id
+      JOIN cities c ON z.city_id = c.city_id
+      LEFT JOIN supervisor_ward sw ON e.ward_id = sw.ward_id
+      WHERE ($1::int IS NULL OR sw.supervisor_id = $1::int)
+        AND ($4::int IS NULL OR c.city_id = $4::int)
+    ),
+    attendance_status AS (
+      SELECT
+        ec.city_id,
+        ec.city_name,
+        ec.emp_id,
+        MAX(CASE WHEN a.punch_in_time IS NOT NULL THEN 1 ELSE 0 END) AS has_punch_in,
+        MAX(CASE WHEN a.punch_out_time IS NOT NULL THEN 1 ELSE 0 END) AS has_punch_out
+      FROM employee_city ec
+      LEFT JOIN attendance a
+        ON a.emp_id = ec.emp_id
+       AND a.date::date BETWEEN $2::date AND $3::date
+      GROUP BY ec.city_id, ec.city_name, ec.emp_id
+    )
+    SELECT
+      city_id,
+      city_name,
+      COUNT(*) AS total_employees,
+      COALESCE(SUM(CASE WHEN has_punch_in = 1 AND has_punch_out = 1 THEN 1 ELSE 0 END), 0) AS marked,
+      COALESCE(SUM(CASE WHEN has_punch_in = 1 AND has_punch_out = 0 THEN 1 ELSE 0 END), 0) AS in_progress,
+      COALESCE(SUM(CASE WHEN has_punch_in = 0 THEN 1 ELSE 0 END), 0) AS not_marked
+    FROM attendance_status
+    GROUP BY city_id, city_name
+    ORDER BY city_name;
+  `;
+
+  const result = await pool.query(query, [
+    userId ?? null,
+    startDate,
+    endDate,
+    cityId ?? null,
+  ]);
+
+  return result.rows.map((row) => ({
+    city_id: row.city_id,
+    city_name: row.city_name || "Unassigned",
+    totalEmployees: Number(row.total_employees) || 0,
+    marked: Number(row.marked) || 0,
+    inProgress: Number(row.in_progress) || 0,
+    notMarked: Number(row.not_marked) || 0,
+  }));
 };
 
 // Summary endpoint for mobile (GET with authentication)
 router.get("/summary", authenticate, async (req, res) => {
-  const user_id = req.user.user_id;
+  const requestingUser = req.user;
+  const isAdmin = requestingUser?.role === "admin";
+  const effectiveUserId = isAdmin ? null : requestingUser?.user_id;
 
-  if (!user_id) {
+  if (!isAdmin && !effectiveUserId) {
     return res.status(400).json({ error: "User ID is required" });
+  }
+
+  const { cityId, valid } = normalizeCityIdInput(req.query.city_id);
+  if (!valid) {
+    return res.status(400).json({ error: "Invalid city ID" });
   }
 
   try {
     const { startDate: startDateRaw, endDate: endDateRaw } = req.query;
     const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
-    const summary = await fetchSupervisorSummary(user_id, startDate, endDate);
+    const summary = await fetchSupervisorSummary(
+      effectiveUserId,
+      cityId,
+      startDate,
+      endDate
+    );
 
     res.json({ success: true, data: summary });
   } catch (error) {
@@ -276,16 +436,28 @@ router.get("/summary", authenticate, async (req, res) => {
 
 // GET endpoint for mobile app (uses JWT token)
 router.get("/", authenticate, async (req, res) => {
-  const user_id = req.user.user_id;
+  const requestingUser = req.user;
+  const isAdmin = requestingUser?.role === "admin";
+  const effectiveUserId = isAdmin ? null : requestingUser?.user_id;
 
-  if (!user_id) {
+  if (!isAdmin && !effectiveUserId) {
     return res.status(400).json({ error: "User ID is required" });
+  }
+
+  const { cityId, valid } = normalizeCityIdInput(req.query.city_id);
+  if (!valid) {
+    return res.status(400).json({ error: "Invalid city ID" });
   }
 
   try {
     const { startDate: startDateRaw, endDate: endDateRaw } = req.query;
     const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
-    const response = await fetchSupervisorEmployees(user_id, startDate, endDate);
+    const response = await fetchSupervisorEmployees(
+      effectiveUserId,
+      cityId,
+      startDate,
+      endDate
+    );
 
     res.json({ success: true, data: response });
   } catch (error) {
@@ -294,17 +466,54 @@ router.get("/", authenticate, async (req, res) => {
   }
 });
 
-// Summary endpoint for web compatibility (POST with explicit user_id)
-router.post("/summary", async (req, res) => {
-  const { user_id, startDate: startDateRaw, endDate: endDateRaw } = req.body;
+router.post("/city-summary", async (req, res) => {
+  const { user_id, city_id, startDate: startDateRaw, endDate: endDateRaw } =
+    req.body;
+  const { userId, valid } = normalizeUserIdInput(user_id);
+  const { cityId, valid: cityValid } = normalizeCityIdInput(city_id);
 
-  if (!user_id) {
-    return res.status(400).json({ error: "User ID is required" });
+  if (!valid) {
+    return res.status(400).json({ error: "Invalid user ID" });
+  }
+
+  if (!cityValid) {
+    return res.status(400).json({ error: "Invalid city ID" });
   }
 
   try {
     const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
-    const summary = await fetchSupervisorSummary(user_id, startDate, endDate);
+    const summary = await fetchCitySummary(userId, cityId, startDate, endDate);
+
+    res.json({ success: true, data: summary });
+  } catch (error) {
+    console.error("Error fetching city summary: ", error);
+    res.status(500).json({ success: false, error: "Internal Server Error" });
+  }
+});
+
+// Summary endpoint for web compatibility (POST with explicit user_id)
+router.post("/summary", async (req, res) => {
+  const { user_id, city_id, startDate: startDateRaw, endDate: endDateRaw } =
+    req.body;
+  const { userId, valid } = normalizeUserIdInput(user_id);
+  const { cityId, valid: cityValid } = normalizeCityIdInput(city_id);
+
+  if (!valid) {
+    return res.status(400).json({ error: "Invalid user ID" });
+  }
+
+  if (!cityValid) {
+    return res.status(400).json({ error: "Invalid city ID" });
+  }
+
+  try {
+    const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
+    const summary = await fetchSupervisorSummary(
+      userId,
+      cityId,
+      startDate,
+      endDate
+    );
 
     res.json({ success: true, data: summary });
   } catch (error) {
@@ -315,15 +524,27 @@ router.post("/summary", async (req, res) => {
 
 // POST endpoint for web app (backward compatibility)
 router.post("/", async (req, res) => {
-  const { user_id, startDate: startDateRaw, endDate: endDateRaw } = req.body;
+  const { user_id, city_id, startDate: startDateRaw, endDate: endDateRaw } =
+    req.body;
+  const { userId, valid } = normalizeUserIdInput(user_id);
+  const { cityId, valid: cityValid } = normalizeCityIdInput(city_id);
 
-  if (!user_id) {
-    return res.status(400).json({ error: "User ID is required" });
+  if (!valid) {
+    return res.status(400).json({ error: "Invalid user ID" });
+  }
+
+  if (!cityValid) {
+    return res.status(400).json({ error: "Invalid city ID" });
   }
 
   try {
     const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
-    const response = await fetchSupervisorEmployees(user_id, startDate, endDate);
+    const response = await fetchSupervisorEmployees(
+      userId,
+      cityId,
+      startDate,
+      endDate
+    );
 
     res.json({ success: true, data: response });
   } catch (error) {

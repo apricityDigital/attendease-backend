@@ -6,6 +6,41 @@ const authenticateToken = require("../middleware/authMiddleware"); // ✅ Import
 
 const router = express.Router();
 
+const getUserAccessProfile = async (userId) => {
+  const rolesQuery = `
+    SELECT r.id, r.name
+    FROM user_roles ur
+    JOIN roles r ON r.id = ur.role_id
+    WHERE ur.user_id = $1
+  `;
+
+  const permissionsQuery = `
+    SELECT DISTINCT p.id, p.module, p.action, p.label
+    FROM (
+      SELECT permission_id
+      FROM role_permissions rp
+      JOIN user_roles ur ON ur.role_id = rp.role_id
+      WHERE ur.user_id = $1
+      UNION
+      SELECT permission_id
+      FROM user_permissions
+      WHERE user_id = $1
+    ) perm
+    JOIN permissions p ON p.id = perm.permission_id
+    ORDER BY p.module, p.action
+  `;
+
+  const [rolesResult, permissionsResult] = await Promise.all([
+    pool.query(rolesQuery, [userId]),
+    pool.query(permissionsQuery, [userId]),
+  ]);
+
+  return {
+    roles: rolesResult.rows,
+    permissions: permissionsResult.rows,
+  };
+};
+
 // ✅ Get Logged-in User
 router.get("/me", authenticateToken, async (req, res) => {
   try {
@@ -18,7 +53,12 @@ router.get("/me", authenticateToken, async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    res.json(user.rows[0]);
+    const access = await getUserAccessProfile(req.user.user_id);
+
+    res.json({
+      ...user.rows[0],
+      access,
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -94,6 +134,11 @@ router.post("/login", async (req, res) => {
       { expiresIn: "24h" }
     );
 
+    const access = await getUserAccessProfile(user.rows[0].user_id);
+
+    const primaryRole =
+      access.roles?.[0]?.name || user.rows[0].role || "user";
+
     res.cookie("token", token, { httpOnly: true });
     res.json({
       message: "Login successful",
@@ -102,7 +147,9 @@ router.post("/login", async (req, res) => {
         user_id: user.rows[0].user_id,
         name: user.rows[0].name,
         email: user.rows[0].email,
-        role: user.rows[0].role,
+        role: primaryRole,
+        roles: access.roles,
+        permissions: access.permissions,
         emp_code: user.rows[0].emp_code,
         phone: user.rows[0].phone,
       },
@@ -145,6 +192,8 @@ router.post("/supervisor-login", async (req, res) => {
       { expiresIn: "24h" }
     );
 
+    const access = await getUserAccessProfile(user.rows[0].user_id);
+
     res.json({
       success: true,
       message: "Supervisor login successful",
@@ -153,7 +202,9 @@ router.post("/supervisor-login", async (req, res) => {
         user_id: user.rows[0].user_id,
         name: user.rows[0].name,
         email: user.rows[0].email,
-        role: user.rows[0].role,
+        role: access.roles?.[0]?.name || user.rows[0].role,
+        roles: access.roles,
+        permissions: access.permissions,
         emp_code: user.rows[0].emp_code,
         phone: user.rows[0].phone,
       },

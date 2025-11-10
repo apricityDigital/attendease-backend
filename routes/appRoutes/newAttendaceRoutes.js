@@ -4,6 +4,7 @@ const router = express.Router();
 const pool = require("../../config/db");
 const multer = require("multer");
 const fs = require("fs");
+const path = require("path");
 const sharp = require("sharp");
 const {
   uploadAttendanceImage,
@@ -13,6 +14,16 @@ const {
   extractS3Key,
   getS3ImageStream,
 } = require("../../utils/s3Storage");
+const {
+  hasBackblazeCredentials,
+  isBackblazeUrl,
+  parseBackblazeUrl,
+  fetchBackblazeStream,
+} = require("../../utils/backblaze");
+const {
+  buildAttendanceImagePath,
+  getAttendanceUploadContext,
+} = require("../../utils/attendanceKeyBuilder");
 
 const {
   rekognition,
@@ -27,6 +38,40 @@ const PUNCH_TYPES = {
   IN: "IN",
   OUT: "OUT",
 };
+
+const DEFAULT_ATTENDANCE_TIMEZONE =
+  process.env.ATTENDANCE_TIMEZONE || "Asia/Kolkata";
+const parsedRolloverHour =
+  Number(
+    process.env.NIGHT_SHIFT_ROLLOVER_HOUR ??
+      process.env.ATTENDANCE_ROLLOVER_HOUR ??
+      4
+  ) || 4;
+const NIGHT_SHIFT_ROLLOVER_HOUR =
+  Number.isFinite(parsedRolloverHour) &&
+  parsedRolloverHour >= 0 &&
+  parsedRolloverHour <= 23
+    ? parsedRolloverHour
+    : 4;
+
+const DATE_INPUT_KEYS = ["date", "attendance_date", "punch_date"];
+const TIMESTAMP_INPUT_KEYS = [
+  "timestamp",
+  "client_timestamp",
+  "clientTime",
+  "captured_at",
+];
+
+const attendanceDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: DEFAULT_ATTENDANCE_TIMEZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
 
 // Set up Multer for file uploads
 const storage = multer.memoryStorage();
@@ -142,6 +187,27 @@ const computeCropRegion = (boundingBox, imageWidth, imageHeight, paddingRatio = 
   return { left, top, width, height };
 };
 
+async function normalizeCaptureBuffer(buffer) {
+  if (!buffer) {
+    return buffer;
+  }
+  try {
+    return await sharp(buffer).rotate().toBuffer();
+  } catch (error) {
+    console.warn("normalizeCaptureBuffer: unable to rotate image", error.message || error);
+    return buffer;
+  }
+}
+
+async function ensureNormalizedCaptureFile(file) {
+  if (!file || !file.buffer || file.__normalized) {
+    return file;
+  }
+  file.buffer = await normalizeCaptureBuffer(file.buffer);
+  file.__normalized = true;
+  return file;
+}
+
 async function resolveEmployeeFromFaceIdentifiers({
   faceId = null,
   matchedExternalId = null,
@@ -201,8 +267,11 @@ async function resolveEmployeeFromFaceIdentifiers({
 function validatePunchAttempt(attendance, punchType) {
   if (!attendance) {
     return {
-      status: 404,
-      error: "Attendance record not found",
+      status: punchType === PUNCH_TYPES.OUT ? 400 : 404,
+      error:
+        punchType === PUNCH_TYPES.OUT
+          ? "Must punch in first"
+          : "Attendance record not found",
     };
   }
 
@@ -273,39 +342,211 @@ const DEFAULT_FACE_MATCH_THRESHOLD = Number.isFinite(parsedFaceThreshold)
   : 90;
 
 // Utility functions
-function formatDate(date = new Date()) {
-  const working = new Date(date.getTime());
-  const offsetMinutes = working.getTimezoneOffset();
-  return new Date(working.getTime() - offsetMinutes * 60 * 1000)
-    .toISOString()
-    .split("T")[0];
+const pad2 = (value) => String(value).padStart(2, "0");
+
+function getAttendanceDateParts(date = new Date()) {
+  const parts = attendanceDateFormatter.formatToParts(
+    date instanceof Date && !Number.isNaN(date.getTime()) ? date : new Date()
+  );
+
+  const lookup = (type) =>
+    Number(parts.find((part) => part.type === type)?.value ?? 0);
+
+  return {
+    year: lookup("year"),
+    month: lookup("month"),
+    day: lookup("day"),
+    hour: lookup("hour"),
+  };
 }
 
-async function getOrCreateAttendanceRecord(emp_id, date) {
+function formatDate(date = new Date(), options = {}) {
+  const { rolloverHour = NIGHT_SHIFT_ROLLOVER_HOUR } = options;
+  const validDate =
+    date instanceof Date && !Number.isNaN(date.getTime()) ? date : new Date();
+  const { year, month, day, hour } = getAttendanceDateParts(validDate);
+
+  let adjustedYear = year;
+  let adjustedMonth = month;
+  let adjustedDay = day;
+
+  if (
+    typeof rolloverHour === "number" &&
+    rolloverHour >= 0 &&
+    rolloverHour <= 23 &&
+    hour < rolloverHour
+  ) {
+    const utcDate = new Date(Date.UTC(year, month - 1, day));
+    utcDate.setUTCDate(utcDate.getUTCDate() - 1);
+    adjustedYear = utcDate.getUTCFullYear();
+    adjustedMonth = utcDate.getUTCMonth() + 1;
+    adjustedDay = utcDate.getUTCDate();
+  }
+
+  return `${adjustedYear}-${pad2(adjustedMonth)}-${pad2(adjustedDay)}`;
+}
+
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+function normalizeDateInput(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    if (ISO_DATE_PATTERN.test(trimmed)) {
+      return trimmed;
+    }
+
+    const parsed = new Date(trimmed);
+    if (!Number.isNaN(parsed.getTime())) {
+      return formatDate(parsed);
+    }
+
+    const numeric = Number(trimmed);
+    if (Number.isFinite(numeric)) {
+      return formatDate(new Date(numeric));
+    }
+    return null;
+  }
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return formatDate(value);
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return formatDate(new Date(value));
+  }
+
+  return null;
+}
+
+function resolveAttendanceDate(...sources) {
+  for (const source of sources) {
+    if (!source || typeof source !== "object") {
+      continue;
+    }
+
+    for (const key of DATE_INPUT_KEYS) {
+      const normalized = normalizeDateInput(source[key]);
+      if (normalized) {
+        return normalized;
+      }
+    }
+  }
+
+  for (const source of sources) {
+    if (!source || typeof source !== "object") {
+      continue;
+    }
+
+    for (const key of TIMESTAMP_INPUT_KEYS) {
+      const normalized = normalizeDateInput(source[key]);
+      if (normalized) {
+        return normalized;
+      }
+    }
+  }
+
+  return formatDate();
+}
+
+const ATTENDANCE_SELECT_FIELDS = `
+    a.attendance_id,
+    CAST(a.date AS VARCHAR) AS date,
+    TO_CHAR(a.punch_in_time, 'HH12:MI AM') AS punch_in_time,
+    TO_CHAR(a.punch_out_time, 'HH12:MI AM') AS punch_out_time,
+    a.duration,
+    a.punch_in_image,
+    a.punch_out_image,
+    a.latitude_in,
+    a.longitude_in,
+    a.in_address,
+    a.latitude_out,
+    a.longitude_out,
+    a.out_address,
+    e.emp_id,
+    e.emp_code,
+    e.name AS employee_name,
+    d.designation_name,
+    w.ward_id,
+    w.ward_name
+`;
+
+const ATTENDANCE_SELECT_JOINS = `
+  FROM attendance a
+  JOIN employee e ON a.emp_id = e.emp_id
+  JOIN designation d ON e.designation_id = d.designation_id
+  JOIN wards w ON e.ward_id = w.ward_id
+`;
+
+const buildAttendanceRecordQuery = (whereClause) => `
+  SELECT
+    ${ATTENDANCE_SELECT_FIELDS}
+  ${ATTENDANCE_SELECT_JOINS}
+  WHERE ${whereClause}
+  ORDER BY a.date DESC, a.attendance_id DESC
+  LIMIT 1
+`;
+
+async function fetchAttendanceRecord(whereClause, params) {
+  const query = buildAttendanceRecordQuery(whereClause);
+  const { rows } = await pool.query(query, params);
+  return rows[0] || null;
+}
+
+async function fetchRecentOpenAttendance(empId, date) {
+  if (!empId || !date) {
+    return null;
+  }
+
+  return fetchAttendanceRecord(
+    `
+      a.emp_id = $1
+      AND a.date >= ($2::date - INTERVAL '1 day')
+      AND a.date <= $2::date
+      AND a.punch_in_time IS NOT NULL
+      AND a.punch_out_time IS NULL
+    `,
+    [empId, date]
+  );
+}
+
+async function getOrCreateAttendanceRecord(emp_id, date, options = {}) {
+  const { punchType = null, createIfMissing = true } = options;
+  const targetDate = date || formatDate();
+
+  let attendance = await fetchAttendanceRecord(
+    "a.emp_id = $1 AND a.date = $2::date",
+    [emp_id, targetDate]
+  );
+
+  const needsOpenCarryForward =
+    punchType === PUNCH_TYPES.OUT &&
+    (!attendance || (attendance && !attendance.punch_in_time));
+
+  if (needsOpenCarryForward) {
+    const carriedRecord = await fetchRecentOpenAttendance(emp_id, targetDate);
+    if (carriedRecord) {
+      return carriedRecord;
+    }
+  }
+
+  if (attendance) {
+    return attendance;
+  }
+
+  if (!createIfMissing && punchType === PUNCH_TYPES.OUT) {
+    return null;
+  }
+
   if (!emp_id) throw new Error("Employee ID is required");
 
   // Check if attendance record exists
-  const result = await pool.query(
-    `SELECT a.attendance_id, CAST(a.date AS VARCHAR) AS date, 
-            TO_CHAR(a.punch_in_time, 'HH12:MI AM') AS punch_in_time, 
-            TO_CHAR(a.punch_out_time, 'HH12:MI AM') AS punch_out_time, 
-            a.duration, a.punch_in_image, a.punch_out_image, 
-            a.latitude_in, a.longitude_in, a.in_address, 
-            a.latitude_out, a.longitude_out, a.out_address,
-            e.emp_id, e.emp_code, e.name AS employee_name, 
-            d.designation_name, w.ward_id, w.ward_name
-     FROM attendance a
-     JOIN employee e ON a.emp_id = e.emp_id
-     JOIN designation d ON e.designation_id = d.designation_id
-     JOIN wards w ON e.ward_id = w.ward_id
-     WHERE a.emp_id = $1 AND a.date = $2`,
-    [emp_id, date]
-  );
-
-  if (result.rows.length > 0) {
-    return result.rows[0];
-  }
-
   const wardDetail = await pool.query(
     `SELECT ward_id from employee e where e.emp_id = $1`,
     [emp_id]
@@ -320,10 +561,10 @@ async function getOrCreateAttendanceRecord(emp_id, date) {
     `INSERT INTO attendance (emp_id, date, ward_id) 
      VALUES ($1, $2::date, $3) 
      RETURNING attendance_id, date, ward_id`,
-    [emp_id, date, ward_id]
+    [emp_id, targetDate, ward_id]
   );
 
-  const attendance = {
+  const newAttendance = {
     attendance_id: insertResult.rows[0].attendance_id,
     date,
     punch_in_time: null,
@@ -356,10 +597,10 @@ async function getOrCreateAttendanceRecord(emp_id, date) {
   );
 
   if (empDetails.rows.length > 0) {
-    Object.assign(attendance, empDetails.rows[0]);
+    Object.assign(newAttendance, empDetails.rows[0]);
   }
 
-  return attendance;
+  return newAttendance;
 }
 
 async function processPunch(
@@ -376,11 +617,33 @@ async function processPunch(
     faceMatchThreshold = DEFAULT_FACE_MATCH_THRESHOLD,
   } = options;
 
+  let uploadContext = null;
+  const capturedAt = new Date();
   let uploadResult = null;
   if (imageFile) {
+    uploadContext = await getAttendanceUploadContext(pool, attendanceId);
+    const locationMeta = locationData || {};
+    const punchLabel =
+      punchType === PUNCH_TYPES.IN ? "punch-in" : punchType === PUNCH_TYPES.OUT ? "punch-out" : punchType;
+    const attendanceImageFile =
+      buildAttendanceImagePath({
+        attendanceDate: uploadContext?.attendance_date,
+        punchType: punchLabel,
+        empCode: uploadContext?.emp_code,
+        empId: uploadContext?.emp_id,
+        employeeName: uploadContext?.employee_name,
+        wardName: uploadContext?.ward_name,
+        zoneName: uploadContext?.zone_name,
+        cityName: uploadContext?.city_name,
+        address: locationMeta.address,
+        latitude: locationMeta.latitude,
+        longitude: locationMeta.longitude,
+        capturedAt,
+      }) || `attendance_${attendanceId}_${punchType}.jpg`;
+
     uploadResult = await uploadAttendanceImage(
       imageFile.buffer,
-      `attendance_${attendanceId}_${punchType}.jpg`
+      attendanceImageFile
     );
   }
 
@@ -586,7 +849,7 @@ async function ensureFaceMatch(employeeId, attendanceKey, threshold) {
 // Routes
 router.post("/", async (req, res) => {
   const { emp_id } = req.body;
-  const attendanceDate = formatDate();
+  const attendanceDate = resolveAttendanceDate(req.body, req.query);
 
   try {
     const attendance = await getOrCreateAttendanceRecord(
@@ -603,6 +866,9 @@ router.post("/", async (req, res) => {
 router.put("/", upload.single("image"), async (req, res) => {
   const { attendance_id, punch_type, latitude, longitude, address, userId } =
     req.body;
+  if (req.file) {
+    await ensureNormalizedCaptureFile(req.file);
+  }
 
   if (!attendance_id || !punch_type || !latitude || !longitude || !address) {
     return res.status(400).json({ error: "Missing required fields" });
@@ -681,7 +947,23 @@ router.get("/image", async (req, res) => {
     }
 
     const imageUrl = result.rows[0].image_url;
-    const downloadName = `attendance_${attendance_id}_${punch_type}.jpg`;
+    const backblazeReference = parseBackblazeUrl(imageUrl);
+    let downloadName = `attendance_${attendance_id}_${punch_type}.jpg`;
+    if (isS3Image(imageUrl)) {
+      const key = extractS3Key(imageUrl);
+      if (key) {
+        downloadName = path.basename(key);
+      }
+    } else if (backblazeReference?.key) {
+      downloadName = path.basename(backblazeReference.key);
+    } else if (typeof imageUrl === "string") {
+      try {
+        const parsed = new URL(imageUrl);
+        downloadName = path.basename(parsed.pathname);
+      } catch (_error) {
+        downloadName = path.basename(imageUrl);
+      }
+    }
 
     if (isLocalImage(imageUrl)) {
       const filePath = getLocalImagePath(imageUrl);
@@ -717,6 +999,42 @@ router.get("/image", async (req, res) => {
       } catch (error) {
         console.error("Error streaming S3 image:", error);
         return res.status(500).json({ error: "Unable to fetch image from S3" });
+      }
+    }
+
+    if (backblazeReference && isBackblazeUrl(imageUrl)) {
+      if (!hasBackblazeCredentials()) {
+        console.warn(
+          "Backblaze image requested but credentials are not configured in environment variables."
+        );
+        return res.status(502).json({
+          error: "Backblaze download unavailable",
+          details:
+            "Configure B2_KEY_ID and B2_APPLICATION_KEY in the backend environment to stream private Backblaze images.",
+        });
+      }
+
+      try {
+        const { stream, contentType } = await fetchBackblazeStream(
+          backblazeReference.bucket,
+          backblazeReference.key
+        );
+
+        res.set({
+          "Content-Type": contentType,
+          "Content-Disposition": `inline; filename="${downloadName}"`,
+        });
+
+        return stream.pipe(res);
+      } catch (error) {
+        if (error?.response?.status === 404) {
+          return res.status(404).json({ error: "Image not found" });
+        }
+        console.error("Error streaming Backblaze image:", error);
+        return res.status(502).json({
+          error: "Unable to fetch image from Backblaze",
+          details: error?.message || "Request to Backblaze failed",
+        });
       }
     }
 
@@ -756,13 +1074,16 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
       mode: rawMode,
       faceMatchThreshold: rawThreshold,
     } = req.body;
+    const attendanceDate = resolveAttendanceDate(req.body, req.query);
 
     if (!req.file) {
       return res.status(400).json({
         error: "Face image is required",
       });
     }
+    await ensureNormalizedCaptureFile(req.file);
 
+    const normalizedCaptureBuffer = req.file.buffer;
     const collectionId = resolveCollectionId();
     if (!collectionId) {
       return res.status(500).json({
@@ -810,7 +1131,7 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
 
     if (groupModeRequested) {
       const detectCommand = new DetectFacesCommand({
-        Image: { Bytes: req.file.buffer },
+        Image: { Bytes: normalizedCaptureBuffer },
         Attributes: ["DEFAULT"],
       });
 
@@ -824,7 +1145,7 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
         });
       }
 
-      const imageMetadata = await sharp(req.file.buffer).metadata();
+      const imageMetadata = await sharp(normalizedCaptureBuffer).metadata();
       const imageWidth = imageMetadata?.width ?? null;
       const imageHeight = imageMetadata?.height ?? null;
 
@@ -834,7 +1155,6 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
         });
       }
 
-      const today = formatDate();
       const processedEmployees = new Set();
       const results = [];
 
@@ -858,7 +1178,7 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
 
         let faceImageBuffer;
         try {
-          faceImageBuffer = await sharp(req.file.buffer)
+          faceImageBuffer = await sharp(normalizedCaptureBuffer)
             .extract(cropRegion)
             .resize(600, 600, { fit: "cover" })
             .toBuffer();
@@ -928,7 +1248,11 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
 
           const attendance = await getOrCreateAttendanceRecord(
             employeeRecord.emp_id,
-            today
+            attendanceDate,
+            {
+              punchType,
+              createIfMissing: punchType !== PUNCH_TYPES.OUT,
+            }
           );
           const validation = validatePunchAttempt(attendance, punchType);
 
@@ -1001,7 +1325,7 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
     const requestedEmpId = normalizeId(rawEmpId ?? rawEmployeeId);
     const searchParams = {
       CollectionId: collectionId,
-      Image: { Bytes: req.file.buffer },
+      Image: { Bytes: normalizedCaptureBuffer },
       MaxFaces: 1,
       FaceMatchThreshold: matchThreshold,
     };
@@ -1034,8 +1358,14 @@ router.post("/face-attendance", upload.single("image"), async (req, res) => {
     }
 
     const empId = employeeRecord.emp_id;
-    const today = formatDate();
-    const attendance = await getOrCreateAttendanceRecord(empId, today);
+    const attendance = await getOrCreateAttendanceRecord(
+      empId,
+      attendanceDate,
+      {
+        punchType,
+        createIfMissing: punchType !== PUNCH_TYPES.OUT,
+      }
+    );
 
     const validation = validatePunchAttempt(attendance, punchType);
     if (validation) {

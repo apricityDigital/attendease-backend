@@ -1,9 +1,15 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
+const authenticate = require("../middleware/authMiddleware");
+const { authorize } = require("../middleware/permissionMiddleware");
 
 // Get all departments
-router.get("/", async (req, res) => {
+router.get(
+  "/",
+  authenticate,
+  authorize("master", "view"),
+  async (req, res) => {
   try {
     const result = await pool.query(
       "SELECT * FROM department ORDER BY department_id ASC"
@@ -13,10 +19,15 @@ router.get("/", async (req, res) => {
     console.error("Error fetching departments:", err);
     res.status(500).json({ error: "Internal server error" });
   }
-});
+  }
+);
 
 // Add a new department
-router.post("/", async (req, res) => {
+router.post(
+  "/",
+  authenticate,
+  authorize("master", "manage"),
+  async (req, res) => {
   const { department_name } = req.body;
 
   if (!department_name) {
@@ -33,10 +44,15 @@ router.post("/", async (req, res) => {
     console.error("Error adding department:", err);
     res.status(500).json({ error: "Internal server error" });
   }
-});
+  }
+);
 
 // Update a department
-router.put("/:id", async (req, res) => {
+router.put(
+  "/:id",
+  authenticate,
+  authorize("master", "manage"),
+  async (req, res) => {
   const { id } = req.params;
   const { department_name } = req.body;
 
@@ -59,10 +75,15 @@ router.put("/:id", async (req, res) => {
     console.error("Error updating department:", err);
     res.status(500).json({ error: "Internal server error" });
   }
-});
+  }
+);
 
 // Delete a department
-router.delete("/:id", async (req, res) => {
+router.delete(
+  "/:id",
+  authenticate,
+  authorize("master", "manage"),
+  async (req, res) => {
   const { id } = req.params;
 
   try {
@@ -80,6 +101,7 @@ router.delete("/:id", async (req, res) => {
     console.error("Error deleting department:", err);
     res.status(500).json({ error: "Internal server error" });
   }
-});
+  }
+);
 
 module.exports = router;

@@ -5,12 +5,43 @@ const authenticate = require("../middleware/authenticate"); // Ensure users are 
 
 // ✅ Fetch all supervisors (Only Admins can fetch)
 router.get("/", async (req, res) => {
+  const { cityId: rawCityId } = req.query;
+
+  let cityId = null;
+  if (rawCityId && rawCityId.toString().trim().toUpperCase() !== "ALL") {
+    const parsed = Number(rawCityId);
+    if (!Number.isFinite(parsed)) {
+      return res.status(400).json({ error: "Invalid city ID" });
+    }
+    cityId = parsed;
+  }
+
   try {
     const supervisors = await pool.query(
-      "SELECT user_id, name, emp_code, email, phone, role FROM users WHERE role = 'supervisor'"
+      `
+        SELECT DISTINCT
+          u.user_id,
+          u.name,
+          u.emp_code,
+          u.email,
+          u.phone,
+          u.role,
+          c.city_id,
+          c.city_name
+        FROM users u
+        LEFT JOIN supervisor_ward sw ON u.user_id = sw.supervisor_id
+        LEFT JOIN wards w ON sw.ward_id = w.ward_id
+        LEFT JOIN zones z ON w.zone_id = z.zone_id
+        LEFT JOIN cities c ON z.city_id = c.city_id
+        WHERE u.role = 'supervisor'
+          AND ($1::int IS NULL OR c.city_id = $1::int)
+        ORDER BY u.name
+      `,
+      [cityId]
     );
     res.json(supervisors.rows);
   } catch (error) {
+    console.error("Failed to fetch supervisors:", error);
     res.status(500).json({ error: "Server error" });
   }
 });

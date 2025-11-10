@@ -15,6 +15,7 @@ const attendanceRoutes = require("./attendanceRoutes");
 const supervisorRoutes = require("./supervisorRoutes");
 const assignedWardRoutes = require("./assignedWardRoutes");
 const adminRoutes = require("./adminRoutes");
+const rbacRoutes = require("./rbacRoutes");
 
 // Protected Route
 router.get("/protected", authenticateUser, (req, res) => {
@@ -32,5 +33,6 @@ router.use("/attendance", attendanceRoutes);
 router.use("/supervisor", supervisorRoutes);
 router.use("/assignedWardRoutes", assignedWardRoutes);
 router.use("/admin", adminRoutes);
+router.use("/rbac", rbacRoutes);
 
 module.exports = router;

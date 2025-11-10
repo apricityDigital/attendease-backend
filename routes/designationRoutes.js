@@ -1,9 +1,15 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
+const authenticate = require("../middleware/authMiddleware");
+const { authorize } = require("../middleware/permissionMiddleware");
 
 // Get all designations
-router.get("/", async (req, res) => {
+router.get(
+  "/",
+  authenticate,
+  authorize("master", "view"),
+  async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT d.designation_id, d.designation_name, d.department_id, 
@@ -16,10 +22,15 @@ router.get("/", async (req, res) => {
     console.error("Error fetching designations:", error);
     res.status(500).json({ error: "Internal server error" });
   }
-});
+  }
+);
 
 // Insert a new designation
-router.post("/", async (req, res) => {
+router.post(
+  "/",
+  authenticate,
+  authorize("master", "manage"),
+  async (req, res) => {
   const { designation_name, department_id } = req.body;
 
   if (!designation_name || !department_id) {
@@ -36,10 +47,15 @@ router.post("/", async (req, res) => {
     console.error("Error adding designation:", err);
     res.status(500).json({ error: "Internal server error" });
   }
-});
+  }
+);
 
 // Update an existing designation
-router.put("/:id", async (req, res) => {
+router.put(
+  "/:id",
+  authenticate,
+  authorize("master", "manage"),
+  async (req, res) => {
   const { designation_name, department_id } = req.body;
   const designationId = req.params.id;
 
@@ -62,10 +78,15 @@ router.put("/:id", async (req, res) => {
     console.error("Error updating designation:", error);
     res.status(500).json({ error: "Internal server error" });
   }
-});
+  }
+);
 
 // Delete a designation
-router.delete("/:id", async (req, res) => {
+router.delete(
+  "/:id",
+  authenticate,
+  authorize("master", "manage"),
+  async (req, res) => {
   try {
     const designationId = req.params.id;
 
@@ -83,6 +104,7 @@ router.delete("/:id", async (req, res) => {
     console.error("Error deleting designation:", error);
     res.status(500).json({ error: "Internal server error" });
   }
-});
+  }
+);
 
 module.exports = router;

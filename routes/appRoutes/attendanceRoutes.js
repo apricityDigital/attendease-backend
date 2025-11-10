@@ -1,6 +1,7 @@
 const express = require("express");
 const axios = require("axios");
 const fs = require("fs");
+const path = require("path");
 const router = express.Router();
 const pool = require("../../config/db");
 const multer = require("multer");
@@ -12,6 +13,10 @@ const {
   extractS3Key,
   getS3ImageStream,
 } = require("../../utils/s3Storage");
+const {
+  buildAttendanceImagePath,
+  getAttendanceUploadContext,
+} = require("../../utils/attendanceKeyBuilder");
 
 // Set up Multer for file uploads
 const storage = multer.memoryStorage();
@@ -152,10 +157,29 @@ router.put("/", upload.single("image"), async (req, res) => {
 
     // Upload image directly as binary if provided
     if (req.file) {
+      const uploadContext = await getAttendanceUploadContext(pool, attendance_id);
       // Upload the raw buffer directly without base64 conversion
       const uploadResult = await uploadAttendanceImage(
         req.file.buffer, // Direct binary buffer
-        `attendance_${attendance_id}_${punch_type}.jpg`
+        buildAttendanceImagePath({
+          attendanceDate: uploadContext?.attendance_date,
+          punchType:
+            punch_type === "IN"
+              ? "punch-in"
+              : punch_type === "OUT"
+              ? "punch-out"
+              : punch_type,
+          empCode: uploadContext?.emp_code,
+          empId: uploadContext?.emp_id,
+          employeeName: uploadContext?.employee_name,
+          wardName: uploadContext?.ward_name,
+          zoneName: uploadContext?.zone_name,
+          cityName: uploadContext?.city_name,
+          address,
+          latitude,
+          longitude,
+          capturedAt: new Date(),
+        })
       );
       imageUrl = uploadResult?.url ?? null;
     }
@@ -224,7 +248,20 @@ router.get("/image", async (req, res) => {
     }
 
     const imageUrl = result.rows[0].image_url;
-    const downloadName = `attendance_${attendance_id}_${punch_type}.jpg`;
+    let downloadName = `attendance_${attendance_id}_${punch_type}.jpg`;
+    if (isS3Image(imageUrl)) {
+      const key = extractS3Key(imageUrl);
+      if (key) {
+        downloadName = path.basename(key);
+      }
+    } else if (typeof imageUrl === "string") {
+      try {
+        const parsed = new URL(imageUrl);
+        downloadName = path.basename(parsed.pathname);
+      } catch (_error) {
+        downloadName = path.basename(imageUrl);
+      }
+    }
 
     if (isLocalImage(imageUrl)) {
       const filePath = getLocalImagePath(imageUrl);

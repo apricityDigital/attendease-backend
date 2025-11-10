@@ -1,9 +1,15 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
+const authenticate = require("../middleware/authMiddleware");
+const { authorize } = require("../middleware/permissionMiddleware");
 
 // 🟢 Fetch all zones with city names
-router.get("/", async (req, res) => {
+router.get(
+  "/",
+  authenticate,
+  authorize("master", "view"),
+  async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT z.zone_id, z.zone_name, c.city_id, c.city_name
@@ -16,10 +22,15 @@ router.get("/", async (req, res) => {
     console.error("Error fetching zones:", error);
     res.status(500).json({ error: "Database error" });
   }
-});
+  }
+);
 
 // 🟢 Add a new zone
-router.post("/", async (req, res) => {
+router.post(
+  "/",
+  authenticate,
+  authorize("master", "manage"),
+  async (req, res) => {
   const { zone_name, city_id } = req.body;
   if (!zone_name || !city_id) {
     return res
@@ -37,10 +48,15 @@ router.post("/", async (req, res) => {
     console.error("Error adding zone:", error);
     res.status(500).json({ error: "Database error" });
   }
-});
+  }
+);
 
 // 🟢 Edit a zone
-router.put("/:id", async (req, res) => {
+router.put(
+  "/:id",
+  authenticate,
+  authorize("master", "manage"),
+  async (req, res) => {
   const { id } = req.params;
   const { zone_name } = req.body;
 
@@ -57,10 +73,15 @@ router.put("/:id", async (req, res) => {
     console.error("Error updating zone:", error);
     res.status(500).json({ error: "Database error" });
   }
-});
+  }
+);
 
 // 🟢 Delete a zone
-router.delete("/:id", async (req, res) => {
+router.delete(
+  "/:id",
+  authenticate,
+  authorize("master", "manage"),
+  async (req, res) => {
   const { id } = req.params;
 
   try {
@@ -76,6 +97,7 @@ router.delete("/:id", async (req, res) => {
     console.error("Error deleting zone:", error);
     res.status(500).json({ error: "Database error" });
   }
-});
+  }
+);
 
 module.exports = router;
