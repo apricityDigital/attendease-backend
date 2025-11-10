@@ -3,7 +3,7 @@ const multerS3 = require("multer-s3");
 const { s3 } = require("../config/awsConfig");
 require("dotenv").config();
 
-const bucketName = process.env.AWS_S3_BUCKET || process.env.AWS_S3_BUCKET;
+const bucketName = process.env.AWS_S3_BUCKET || process.env.S3_BUCKET_NAME;
 
 const upload = multer({
   storage: multerS3({
