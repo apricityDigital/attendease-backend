@@ -13,22 +13,39 @@ const app = express();
 
 // Middleware
 app.use(express.json());
+const defaultOrigins = [
+  "http://localhost:3000",
+  "http://localhost:3002",
+  "http://192.168.29.213:3000",
+  "http://192.168.29.213:61960",
+  "https://d30v7d7vnspm71.cloudfront.net", // CloudFront
+  "http://attendease-frontend.s3-website.ap-south-1.amazonaws.com", // S3 frontend
+  "https://c68e-2405-201-300b-8910-9562-50d3-77c0-e73d.ngrok-free.app",
+  "http://192.168.29.88:8081", // React Native Metro bundler
+  "http://192.168.29.88:19000", // Expo development server
+  "http://10.205.83.56:8081",
+  "http://10.205.83.56:8082",
+  "http://10.205.83.56:19000",
+];
+
+const parseOrigins = (value) =>
+  value
+    ?.split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+const envOrigins = parseOrigins(process.env.FRONTEND_ORIGINS) || [];
+const allowedOrigins = [...new Set([...defaultOrigins, ...envOrigins])];
+
 app.use(
   cors({
-    origin: [
-      "http://localhost:3000",
-      "http://localhost:3002",
-      "http://192.168.29.213:3000",
-      "http://192.168.29.213:61960",
-      "https://d30v7d7vnspm71.cloudfront.net", // CloudFront
-      "http://attendease-frontend.s3-website.ap-south-1.amazonaws.com", // S3 frontend
-      "https://c68e-2405-201-300b-8910-9562-50d3-77c0-e73d.ngrok-free.app",
-      "http://192.168.29.88:8081", // React Native Metro bundler
-      "http://192.168.29.88:19000", // Expo development server
-      "http://10.205.83.56:8081", // React Native Metro bundler (new IP)
-      "http://10.205.83.56:8082", // Expo development server (new IP)
-      "http://10.205.83.56:19000", // Expo development server (new IP)
-    ],
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error("Not allowed by CORS"));
+    },
     credentials: true,
   })
 );
