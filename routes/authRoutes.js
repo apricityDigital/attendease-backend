@@ -94,20 +94,82 @@ router.post("/register", async (req, res) => {
 });
 
 router.put("/update", async (req, res) => {
-  const { user_id, name, emp_code, email, phone, role } = req.body;
+  const {
+    user_id,
+    name,
+    emp_code,
+    email,
+    phone,
+    role,
+    passChange = false,
+    password,
+  } = req.body;
 
   if (!user_id || !name || !emp_code || !email || !phone || !role) {
     return res.status(400).json({ error: "All fields are required" });
   }
 
-  try {
-    const result = await pool.query(
-      "UPDATE USERS SET name = $2, emp_code = $3, email = $4, phone = $5, role = $6 where user_id = $1",
-      [user_id, name, emp_code, email, phone, role]
-    );
+  if (passChange && !password) {
+    return res
+      .status(400)
+      .json({ error: "Password is required when passChange is true" });
+  }
 
-    res.status(200).json({ message: "User updated", user: result.rows[0] });
+  try {
+    let queryText;
+    let queryParams;
+
+    if (passChange) {
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(password, salt);
+      queryText = `
+        UPDATE users
+        SET name = $2,
+            emp_code = $3,
+            email = $4,
+            phone = $5,
+            role = $6,
+            password_hash = $7
+        WHERE user_id = $1
+        RETURNING user_id, name, emp_code, email, phone, role
+      `;
+      queryParams = [
+        user_id,
+        name,
+        emp_code,
+        email,
+        phone,
+        role,
+        hashedPassword,
+      ];
+    } else {
+      queryText = `
+        UPDATE users
+        SET name = $2,
+            emp_code = $3,
+            email = $4,
+            phone = $5,
+            role = $6
+        WHERE user_id = $1
+        RETURNING user_id, name, emp_code, email, phone, role
+      `;
+      queryParams = [user_id, name, emp_code, email, phone, role];
+    }
+
+    const result = await pool.query(queryText, queryParams);
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.status(200).json({
+      message: passChange
+        ? "User updated with new password"
+        : "User updated successfully",
+      user: result.rows[0],
+    });
   } catch (error) {
+    console.error("Error updating user:", error);
     res.status(500).json({ error: "Updation failed" });
   }
 });

@@ -94,16 +94,51 @@ const syncUserPermissions = async (userId, permissions, actorId) => {
   await pool.query("DELETE FROM user_permissions WHERE user_id = $1", [userId]);
   if (!permissions || permissions.length === 0) return;
 
-  const permissionIds = permissions.map((entry) => entry.permissionId);
-  const cityIds = permissions.map((entry) => entry.cityId);
+  const payload = permissions
+    .map((entry) => {
+      const permissionId = Number(entry.permissionId);
+      if (!Number.isFinite(permissionId)) {
+        return null;
+      }
+
+      const cityId =
+        entry.cityId === null ||
+        entry.cityId === undefined ||
+        entry.cityId === "*" ||
+        entry.cityId === ""
+          ? null
+          : Number(entry.cityId);
+
+      if (cityId !== null && !Number.isFinite(cityId)) {
+        return null;
+      }
+
+      return {
+        permission_id: permissionId,
+        city_id: cityId,
+      };
+    })
+    .filter(Boolean);
+
+  if (!payload.length) {
+    return;
+  }
 
   await pool.query(
     `
       INSERT INTO user_permissions (user_id, permission_id, city_id, granted_at, granted_by)
-      SELECT $1, data.permission_id, data.city_id, NOW(), $3
-      FROM UNNEST($2::int[], $4::int[]) AS data(permission_id, city_id)
+      SELECT
+        $1,
+        (data->>'permission_id')::int,
+        CASE
+          WHEN data->>'city_id' IS NULL OR data->>'city_id' = '' THEN NULL
+          ELSE (data->>'city_id')::int
+        END,
+        NOW(),
+        $2
+      FROM jsonb_array_elements($3::jsonb) AS data
     `,
-    [userId, permissionIds, cityIds, actorId ?? null]
+    [userId, actorId ?? null, JSON.stringify(payload)]
   );
 };
 

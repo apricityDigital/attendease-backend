@@ -1,5 +1,6 @@
 const express = require("express");
 const router = express.Router();
+const bcrypt = require("bcryptjs");
 const pool = require("../config/db");
 const authenticate = require("../middleware/authenticate"); // Ensure users are logged in
 
@@ -49,29 +50,73 @@ router.get("/", async (req, res) => {
 // ✅ Update Supervisor (Name, Phone, Email Only)
 router.put("/:id", authenticate, async (req, res) => {
   const { id } = req.params;
-  const { name, emp_code, email, phone, role, password, passChange } = req.body;
+  const {
+    name,
+    emp_code,
+    email,
+    phone,
+    role,
+    password,
+    passChange = false,
+  } = req.body;
+
+  if (!name || !emp_code || !email || !phone || !role) {
+    return res.status(400).json({ error: "All fields are required" });
+  }
+
+  if (passChange && !password) {
+    return res
+      .status(400)
+      .json({ error: "Password is required when passChange is true" });
+  }
 
   try {
+    let queryText;
+    let queryParams;
+
     if (passChange) {
-      await pool.query(
-        "UPDATE users SET name=$1, emp_code=$2, email=$3, phone=$4, role=$5, password=crypt($6, gen_salt('bf')) WHERE user_id=$7",
-        [name, emp_code, email, phone, role, password, id]
-      );
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(password, salt);
+      queryText = `
+        UPDATE users
+        SET name = $2,
+            emp_code = $3,
+            email = $4,
+            phone = $5,
+            role = $6,
+            password_hash = $7
+        WHERE user_id = $1
+        RETURNING user_id, name, emp_code, email, phone, role
+      `;
+      queryParams = [id, name, emp_code, email, phone, role, hashedPassword];
     } else {
-      await pool.query(
-        "UPDATE users SET name=$1, emp_code=$2, email=$3, phone=$4, role=$5 WHERE user_id=$6",
-        [name, emp_code, email, phone, role, id]
-      );
+      queryText = `
+        UPDATE users
+        SET name = $2,
+            emp_code = $3,
+            email = $4,
+            phone = $5,
+            role = $6
+        WHERE user_id = $1
+        RETURNING user_id, name, emp_code, email, phone, role
+      `;
+      queryParams = [id, name, emp_code, email, phone, role];
     }
-    if (result.rows.length === 0) {
+
+    const result = await pool.query(queryText, queryParams);
+
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: "Supervisor not found" });
     }
+
     res.json({
-      message: "Supervisor updated successfully",
+      message: passChange
+        ? "Supervisor updated with new password"
+        : "Supervisor updated successfully",
       data: result.rows[0],
     });
   } catch (error) {
-    console.error(error);
+    console.error("Failed to update supervisor:", error);
     res.status(500).json({ error: "Update failed" });
   }
 });
