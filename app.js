@@ -20,6 +20,7 @@ const defaultOrigins = [
   "http://192.168.29.213:61960",
   "https://d30v7d7vnspm71.cloudfront.net", // CloudFront
   "http://attendease-frontend.s3-website.ap-south-1.amazonaws.com", // S3 frontend
+  "http://matrixtrackfrontend.s3-website.ap-south-1.amazonaws.com", // MatrixTrack S3 frontend
   "https://c68e-2405-201-300b-8910-9562-50d3-77c0-e73d.ngrok-free.app",
   "http://192.168.29.88:8081", // React Native Metro bundler
   "http://192.168.29.88:19000", // Expo development server
