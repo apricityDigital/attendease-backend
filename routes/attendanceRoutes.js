@@ -63,4 +63,51 @@ const handleAttendanceDownload = createAttendanceDownloadHandler({ pool });
 // Download attendance reports with flexible grouping & filters
 router.get("/download", handleAttendanceDownload);
 
+// Short Attendance summarized report by ward
+router.get("/short-report", async (req, res) => {
+  const { cityName, zoneName, date } = req.query;
+  if (!cityName || !zoneName) {
+    return res
+      .status(400)
+      .json({ error: "cityName and zoneName query params are required." });
+  }
+
+  const targetDate = date || formatDateIST();
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT 
+        c.city_name,
+        z.zone_name,
+        w.ward_name,
+        COALESCE(STRING_AGG(DISTINCT u.name, ', ' ORDER BY u.name), '') AS supervisor_names,
+        COUNT(DISTINCT e.emp_id) AS total_registered_employees,
+        COUNT(
+          DISTINCT CASE 
+            WHEN a.date::date = $3 THEN a.attendance_id 
+          END
+        ) AS total_present_employees
+      FROM public.wards w
+      JOIN public.zones z ON w.zone_id = z.zone_id
+      JOIN public.cities c ON z.city_id = c.city_id
+      LEFT JOIN public.employee e ON w.ward_id = e.ward_id
+      LEFT JOIN public.supervisor_ward sw ON w.ward_id = sw.ward_id
+      LEFT JOIN public.users u ON sw.supervisor_id = u.user_id
+      LEFT JOIN public.attendance a ON e.emp_id = a.emp_id
+      WHERE c.city_name = $1
+        AND z.zone_name = $2
+      GROUP BY c.city_name, z.zone_name, w.ward_name
+      ORDER BY w.ward_name ASC`,
+      [cityName, zoneName, targetDate]
+    );
+
+    res.json(rows);
+  } catch (error) {
+    console.error("Error fetching short attendance report:", error);
+    res
+      .status(500)
+      .json({ error: "Unable to fetch short attendance report." });
+  }
+});
+
 module.exports = router;
