@@ -4,6 +4,14 @@ const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const path = require("path");
 
+process.on("unhandledRejection", (reason) => {
+  console.error("UNHANDLED REJECTION:", reason);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("UNCAUGHT EXCEPTION:", error);
+});
+
 // Import Routes
 const authRoutes = require("./routes/authRoutes");
 const allRoutes = require("./routes/index");

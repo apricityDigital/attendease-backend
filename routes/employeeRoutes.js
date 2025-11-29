@@ -30,40 +30,44 @@ router.get("/", async (req, res) => {
   }
 });
 
-// 🟢 Insert a new employee
+// 🟢 Insert or update an employee (idempotent)
 router.post("/", async (req, res) => {
+  const { name, emp_code, phone, ward_id, designation_id } = req.body;
+
+  if (!emp_code) {
+    return res.status(400).json({ error: "emp_code is required" });
+  }
+
+  const upsertEmployeeQuery = `
+    INSERT INTO employee (emp_code, name, phone, ward_id, designation_id)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (emp_code)
+    DO UPDATE SET
+      name = EXCLUDED.name,
+      phone = EXCLUDED.phone,
+      ward_id = EXCLUDED.ward_id,
+      designation_id = EXCLUDED.designation_id
+    RETURNING *;
+  `;
+
   try {
-    const { name, emp_code, phone, ward_id, designation_id } = req.body;
-    if (!emp_code) {
-      return res.status(400).json({ error: "emp_code is required" });
-    }
-
-    const result = await pool.query(
-      `INSERT INTO employee (name, emp_code, phone, ward_id, designation_id)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (emp_code) DO UPDATE SET
-         name = EXCLUDED.name,
-         phone = EXCLUDED.phone,
-         ward_id = EXCLUDED.ward_id,
-         designation_id = EXCLUDED.designation_id
-       RETURNING *, (xmax = 0) AS inserted`,
-      [name, emp_code, phone, ward_id, designation_id]
-    );
-
-    const employee = result.rows[0];
-    const created = employee?.inserted ?? false;
-
-    if (employee) {
-      delete employee.inserted;
-    }
-
-    return res.status(created ? 201 : 200).json({
-      message: created ? "Employee created" : "Employee updated",
-      employee,
-    });
+    const result = await pool.query(upsertEmployeeQuery, [
+      emp_code,
+      name,
+      phone,
+      ward_id,
+      designation_id,
+    ]);
+    return res.status(200).json(result.rows[0]);
   } catch (error) {
+    if (error.code === "23505") {
+      return res.status(409).json({
+        message: "Employee already exists",
+        emp_code,
+      });
+    }
     console.error("Error inserting employee:", error);
-    res.status(500).json({ error: "Database error" });
+    return res.status(500).json({ message: "Internal error" });
   }
 });
 
