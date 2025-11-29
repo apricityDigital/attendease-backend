@@ -34,12 +34,33 @@ router.get("/", async (req, res) => {
 router.post("/", async (req, res) => {
   try {
     const { name, emp_code, phone, ward_id, designation_id } = req.body;
+    if (!emp_code) {
+      return res.status(400).json({ error: "emp_code is required" });
+    }
+
     const result = await pool.query(
-      `INSERT INTO employee (name, emp_code, phone, ward_id, designation_id) 
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      `INSERT INTO employee (name, emp_code, phone, ward_id, designation_id)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (emp_code) DO UPDATE SET
+         name = EXCLUDED.name,
+         phone = EXCLUDED.phone,
+         ward_id = EXCLUDED.ward_id,
+         designation_id = EXCLUDED.designation_id
+       RETURNING *, (xmax = 0) AS inserted`,
       [name, emp_code, phone, ward_id, designation_id]
     );
-    res.status(201).json(result.rows[0]);
+
+    const employee = result.rows[0];
+    const created = employee?.inserted ?? false;
+
+    if (employee) {
+      delete employee.inserted;
+    }
+
+    return res.status(created ? 201 : 200).json({
+      message: created ? "Employee created" : "Employee updated",
+      employee,
+    });
   } catch (error) {
     console.error("Error inserting employee:", error);
     res.status(500).json({ error: "Database error" });
@@ -88,6 +109,11 @@ router.put("/:id", async (req, res) => {
     res.json(updatedEmployee.rows[0]);
   } catch (error) {
     console.error("Error updating employee:", error);
+    if (error.code === "23505") {
+      return res.status(409).json({
+        error: `Employee with emp_code ${req.body.emp_code} already exists`,
+      });
+    }
     res.status(500).json({ error: "Database error" });
   }
 });
