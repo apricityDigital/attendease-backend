@@ -81,6 +81,7 @@ router.get("/short-report", async (req, res) => {
         z.zone_name,
         w.ward_name,
         COALESCE(STRING_AGG(DISTINCT u.name, ', ' ORDER BY u.name), '') AS supervisor_names,
+        COALESCE(STRING_AGG(DISTINCT dept.department_name, ', ' ORDER BY dept.department_name), '') AS departments,
         COUNT(DISTINCT e.emp_id) AS total_registered_employees,
         COUNT(
           DISTINCT CASE 
@@ -91,6 +92,8 @@ router.get("/short-report", async (req, res) => {
       JOIN public.zones z ON w.zone_id = z.zone_id
       JOIN public.cities c ON z.city_id = c.city_id
       LEFT JOIN public.employee e ON w.ward_id = e.ward_id
+      LEFT JOIN public.designation ds ON e.designation_id = ds.designation_id
+      LEFT JOIN public.department dept ON ds.department_id = dept.department_id
       LEFT JOIN public.supervisor_ward sw ON w.ward_id = sw.ward_id
       LEFT JOIN public.users u ON sw.supervisor_id = u.user_id
       LEFT JOIN public.attendance a ON e.emp_id = a.emp_id
