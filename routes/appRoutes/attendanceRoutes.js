@@ -68,12 +68,35 @@ router.post("/", async (req, res) => {
     } else {
       // Create a new attendance record
       const insertResult = await pool.query(
-        `INSERT INTO attendance (emp_id, date, ward_id) VALUES ($1, CURRENT_DATE, $2) RETURNING attendance_id, date`,
+        `INSERT INTO attendance (emp_id, date, ward_id)
+         VALUES ($1, CURRENT_DATE, $2)
+         ON CONFLICT (emp_id, date) DO NOTHING
+         RETURNING attendance_id, date, ward_id`,
         [emp_id, ward_id]
       );
 
+      if (insertResult.rowCount === 0) {
+        console.warn("Record exists, skipping");
+      }
+
+      const baseAttendance =
+        insertResult.rows[0] ||
+        (
+          await pool.query(
+            `SELECT attendance_id, date, ward_id FROM attendance WHERE emp_id = $1 AND date = CURRENT_DATE LIMIT 1`,
+            [emp_id]
+          )
+        ).rows[0];
+
+      if (!baseAttendance) {
+        console.warn("Record exists, skipping");
+        return res
+          .status(200)
+          .json({ message: "Record exists, skipping", emp_id });
+      }
+
       attendance = {
-        attendance_id: insertResult.rows[0].attendance_id,
+        attendance_id: baseAttendance.attendance_id,
         date: attendanceDate,
         punch_in_time: null,
         punch_out_time: null,
@@ -90,7 +113,7 @@ router.post("/", async (req, res) => {
         emp_code: null, // Fetching separately
         employee_name: null,
         designation_name: null,
-        ward_id: insertResult.rows[0].ward_id,
+        ward_id: baseAttendance.ward_id,
         ward_name: null,
       };
 

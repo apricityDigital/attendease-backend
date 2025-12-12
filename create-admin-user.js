@@ -43,9 +43,23 @@ async function createAdminUser() {
     const result = await pool.query(
       `INSERT INTO users (name, emp_code, email, phone, role, password_hash) 
        VALUES ($1, $2, $3, $4, $5, $6) 
+       ON CONFLICT DO NOTHING
        RETURNING user_id, name, email, emp_code, role, created_at`,
       [adminData.name, adminData.emp_code, adminData.email, adminData.phone, adminData.role, hashedPassword]
     );
+
+    if (result.rows.length === 0) {
+      console.warn('Record exists, skipping');
+      const existing = await pool.query(
+        "SELECT user_id, name, email, emp_code, role, created_at FROM users WHERE email = $1",
+        [adminData.email]
+      );
+      if (existing.rows.length > 0) {
+        console.log('🔑 Existing admin credentials ready');
+        return;
+      }
+      return;
+    }
 
     console.log('✅ Admin user created successfully!');
     console.log('\n👤 Admin User Details:');
@@ -67,17 +81,11 @@ async function createAdminUser() {
     console.log('4. Access 5 admin tabs: Dashboard, Supervisors, Employees, Analytics, Settings');
 
   } catch (error) {
-    console.error('❌ Error creating admin user:', error);
-
     if (error.code === '23505') {
-      console.log('⚠️  Email or Employee Code already exists in database');
-      console.log('   Try using different credentials or check existing users');
-    } else if (error.code === 'ECONNREFUSED') {
-      console.log('⚠️  Database connection failed');
-      console.log('   Make sure PostgreSQL is running and database exists');
-    } else {
-      console.log('   Error details:', error.message);
+      console.warn('Record exists, skipping');
+      return;
     }
+    console.error('❌ Error creating admin user:', error);
   } finally {
     // Close database connection
     await pool.end();

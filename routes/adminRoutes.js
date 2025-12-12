@@ -247,10 +247,14 @@ router.put("/supervisors/:id/assignments", async (req, res) => {
       const values = wardIds.map((wardId, index) => `($1, $${index + 2})`).join(', ');
       const params = [id, ...wardIds];
 
-      await pool.query(
-        `INSERT INTO assigned_wards (supervisor_id, ward_id) VALUES ${values}`,
+      const insertResult = await pool.query(
+        `INSERT INTO assigned_wards (supervisor_id, ward_id) VALUES ${values} ON CONFLICT DO NOTHING`,
         params
       );
+
+      if (insertResult.rowCount < wardIds.length) {
+        console.warn("Record exists, skipping");
+      }
     }
 
     await pool.query('COMMIT');

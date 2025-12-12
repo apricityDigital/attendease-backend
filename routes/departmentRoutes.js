@@ -36,9 +36,24 @@ router.post(
 
   try {
     const result = await pool.query(
-      "INSERT INTO department (department_name) VALUES ($1) RETURNING *",
+      `INSERT INTO department (department_name)
+       VALUES ($1)
+       ON CONFLICT DO NOTHING
+       RETURNING *`,
       [department_name]
     );
+
+    if (result.rowCount === 0) {
+      console.warn("Record exists, skipping");
+      const existing = await pool.query(
+        "SELECT * FROM department WHERE department_name = $1 LIMIT 1",
+        [department_name]
+      );
+      return res
+        .status(200)
+        .json(existing.rows[0] || { message: "Record exists, skipping" });
+    }
+
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error("Error adding department:", err);

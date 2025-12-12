@@ -47,9 +47,24 @@ router.post("/", async (req, res) => {
   }
   try {
     const result = await pool.query(
-      "INSERT INTO supervisor_ward (supervisor_id, ward_id) VALUES ($1, $2) RETURNING *",
+      `INSERT INTO supervisor_ward (supervisor_id, ward_id)
+       VALUES ($1, $2)
+       ON CONFLICT DO NOTHING
+       RETURNING *`,
       [user_id, ward_id]
     );
+
+    if (result.rowCount === 0) {
+      console.warn("Record exists, skipping");
+      const existing = await pool.query(
+        `SELECT * FROM supervisor_ward WHERE supervisor_id = $1 AND ward_id = $2 LIMIT 1`,
+        [user_id, ward_id]
+      );
+      return res
+        .status(200)
+        .json(existing.rows[0] || { message: "Record exists, skipping" });
+    }
+
     res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error("Error Adding Assignment: ", error);

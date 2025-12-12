@@ -77,17 +77,30 @@ router.post("/register", async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
     const result = await pool.query(
-      "INSERT INTO users (name, emp_code, email, phone, role, password_hash) VALUES ($1, $2, $3, $4, $5, $6) RETURNING user_id, name, role",
+      `INSERT INTO users (name, emp_code, email, phone, role, password_hash)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT DO NOTHING
+       RETURNING user_id, name, role`,
       [name, emp_code, email, phone, role, hashedPassword]
     );
+
+    if (result.rowCount === 0) {
+      console.warn("Record exists, skipping");
+      const existing = await pool.query(
+        "SELECT user_id, name, role FROM users WHERE email = $1 OR emp_code = $2 LIMIT 1",
+        [email, emp_code]
+      );
+      return res.status(200).json({
+        message: "Record exists, skipping",
+        user: existing.rows[0] || null,
+      });
+    }
 
     res.status(201).json({ message: "User registered", user: result.rows[0] });
   } catch (error) {
     if (error.code === "23505") {
-      // PostgreSQL unique violation
-      return res
-        .status(400)
-        .json({ error: "Email or Employee Code already exists" });
+      console.warn("Record exists, skipping");
+      return res.status(200).json({ message: "Record exists, skipping" });
     }
     res.status(500).json({ error: "Registration failed" });
   }
@@ -320,9 +333,28 @@ router.post("/create-admin", async (req, res) => {
     const hashedPassword = await bcrypt.hash(adminData.password, salt);
 
     const result = await pool.query(
-      "INSERT INTO users (name, emp_code, email, phone, role, password_hash) VALUES ($1, $2, $3, $4, $5, $6) RETURNING user_id, name, email, emp_code, role",
+      `INSERT INTO users (name, emp_code, email, phone, role, password_hash)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT DO NOTHING
+       RETURNING user_id, name, email, emp_code, role`,
       [adminData.name, adminData.emp_code, adminData.email, adminData.phone, adminData.role, hashedPassword]
     );
+
+    if (result.rowCount === 0) {
+      console.warn("Record exists, skipping");
+      const existing = await pool.query(
+        "SELECT user_id, name, email, emp_code, role FROM users WHERE email = $1 OR emp_code = $2 LIMIT 1",
+        [adminData.email, adminData.emp_code]
+      );
+      return res.status(200).json({
+        message: "Record exists, skipping",
+        admin: existing.rows[0] || null,
+        credentials: {
+          email: adminData.email,
+          password: adminData.password,
+        },
+      });
+    }
 
     res.status(201).json({
       message: "Admin user created successfully",
@@ -335,7 +367,8 @@ router.post("/create-admin", async (req, res) => {
   } catch (error) {
     console.error("Create admin error:", error);
     if (error.code === "23505") {
-      return res.status(400).json({ error: "Email or Employee Code already exists" });
+      console.warn("Record exists, skipping");
+      return res.status(200).json({ message: "Record exists, skipping" });
     }
     res.status(500).json({ error: "Failed to create admin user" });
   }

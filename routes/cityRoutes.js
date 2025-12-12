@@ -45,9 +45,24 @@ router.post(
   }
   try {
     const result = await pool.query(
-      "INSERT INTO public.cities (city_name, state) VALUES ($1, $2) RETURNING *",
+      `INSERT INTO public.cities (city_name, state)
+       VALUES ($1, $2)
+       ON CONFLICT DO NOTHING
+       RETURNING *`,
       [city_name, state]
     );
+
+    if (result.rowCount === 0) {
+      console.warn("Record exists, skipping");
+      const existing = await pool.query(
+        `SELECT * FROM public.cities WHERE city_name = $1 AND state = $2 LIMIT 1`,
+        [city_name, state]
+      );
+      return res
+        .status(200)
+        .json(existing.rows[0] || { message: "Record exists, skipping" });
+    }
+
     res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error("Error adding city:", error);

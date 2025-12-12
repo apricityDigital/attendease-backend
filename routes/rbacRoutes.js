@@ -12,7 +12,7 @@ const { ensureRbacSchema } = require("../utils/rbacSetup");
 const router = express.Router();
 
 ensureRbacSchema().catch((error) => {
-  console.error("RBAC bootstrap error:", error);
+  console.warn("RBAC bootstrap skipped:", error.message || error);
 });
 
 const assertAdminOrPermission = async (req, res, next) => {
@@ -137,6 +137,7 @@ const syncUserPermissions = async (userId, permissions, actorId) => {
         NOW(),
         $2
       FROM jsonb_array_elements($3::jsonb) AS data
+      ON CONFLICT DO NOTHING
     `,
     [userId, actorId ?? null, JSON.stringify(payload)]
   );
@@ -455,6 +456,7 @@ router.post("/users", authenticate, assertAdminOrPermission, async (req, res) =>
       `
         INSERT INTO users (name, emp_code, email, phone, role, department, password_hash)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT DO NOTHING
         RETURNING user_id
       `,
       [
@@ -467,6 +469,22 @@ router.post("/users", authenticate, assertAdminOrPermission, async (req, res) =>
         hashedPassword,
       ]
     );
+
+    if (userResult.rowCount === 0) {
+      console.warn("Record exists, skipping");
+      const existing = await pool.query(
+        `
+          SELECT user_id
+          FROM users
+          WHERE email = $1 OR emp_code = $2
+          LIMIT 1
+        `,
+        [email.toLowerCase(), emp_code || null]
+      );
+      return res
+        .status(200)
+        .json({ id: existing.rows[0]?.user_id, message: "Record exists, skipping" });
+    }
 
     const userId = userResult.rows[0].user_id;
 
@@ -484,10 +502,11 @@ router.post("/users", authenticate, assertAdminOrPermission, async (req, res) =>
     invalidatePermissionCache();
     res.status(201).json({ id: userId });
   } catch (error) {
-    console.error("Failed to create user:", error);
     if (error.code === "23505") {
-      return res.status(400).json({ error: "Email or employee code already exists" });
+      console.warn("Record exists, skipping");
+      return res.status(200).json({ message: "Record exists, skipping" });
     }
+    console.error("Failed to create user:", error);
     res.status(500).json({ error: "Failed to create user" });
   }
 });

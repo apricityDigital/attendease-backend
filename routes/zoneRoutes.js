@@ -40,9 +40,24 @@ router.post(
 
   try {
     const result = await pool.query(
-      `INSERT INTO zones (zone_name, city_id) VALUES ($1, $2) RETURNING *`,
+      `INSERT INTO zones (zone_name, city_id)
+       VALUES ($1, $2)
+       ON CONFLICT DO NOTHING
+       RETURNING *`,
       [zone_name, city_id]
     );
+
+    if (result.rowCount === 0) {
+      console.warn("Record exists, skipping");
+      const existing = await pool.query(
+        `SELECT * FROM zones WHERE zone_name = $1 AND city_id = $2 LIMIT 1`,
+        [zone_name, city_id]
+      );
+      return res
+        .status(200)
+        .json(existing.rows[0] || { message: "Record exists, skipping" });
+    }
+
     res.json(result.rows[0]);
   } catch (error) {
     console.error("Error adding zone:", error);

@@ -117,17 +117,25 @@ router.post(
     const result = await pool.query(
       `INSERT INTO wards (ward_name, zone_id) 
        VALUES ($1, $2) 
+       ON CONFLICT ON CONSTRAINT unique_ward_per_zone DO NOTHING
        RETURNING *`,
       [ward_name, zone_id]
     );
+
+    if (result.rowCount === 0) {
+      console.warn("Record exists, skipping");
+      const existing = await pool.query(
+        `SELECT * FROM wards WHERE ward_name = $1 AND zone_id = $2 LIMIT 1`,
+        [ward_name, zone_id]
+      );
+      return res
+        .status(200)
+        .json(existing.rows[0] || { error: "Ward already exists in this zone" });
+    }
+
     res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error("Error creating ward:", error);
-    if (error.constraint === "unique_ward_per_zone") {
-      return res
-        .status(409)
-        .json({ error: "Ward already exists in this zone" });
-    }
     res.status(500).json({ error: "Internal Server Error" });
   }
   }

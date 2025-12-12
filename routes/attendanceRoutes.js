@@ -82,6 +82,16 @@ router.get("/short-report", async (req, res) => {
         w.ward_name,
         COALESCE(STRING_AGG(DISTINCT u.name, ', ' ORDER BY u.name), '') AS supervisor_names,
         COALESCE(STRING_AGG(DISTINCT dept.department_name, ', ' ORDER BY dept.department_name), '') AS departments,
+        COALESCE(
+          JSON_AGG(
+            JSONB_BUILD_OBJECT(
+              'department', dept_stats.department_name,
+              'total_registered', dept_stats.total_registered,
+              'total_present', dept_stats.total_present
+            )
+          ) FILTER (WHERE dept_stats.department_name IS NOT NULL),
+          '[]'
+        ) AS department_stats,
         COUNT(DISTINCT e.emp_id) AS total_registered_employees,
         COUNT(
           DISTINCT CASE 
@@ -97,6 +107,22 @@ router.get("/short-report", async (req, res) => {
       LEFT JOIN public.supervisor_ward sw ON w.ward_id = sw.ward_id
       LEFT JOIN public.users u ON sw.supervisor_id = u.user_id
       LEFT JOIN public.attendance a ON e.emp_id = a.emp_id
+      LEFT JOIN LATERAL (
+        SELECT 
+          d.department_name,
+          COUNT(DISTINCT e2.emp_id) AS total_registered,
+          COUNT(
+            DISTINCT CASE 
+              WHEN a2.date::date = $3 THEN a2.attendance_id 
+            END
+          ) AS total_present
+        FROM public.employee e2
+        JOIN public.designation ds2 ON e2.designation_id = ds2.designation_id
+        JOIN public.department d ON ds2.department_id = d.department_id
+        LEFT JOIN public.attendance a2 ON e2.emp_id = a2.emp_id
+        WHERE e2.ward_id = w.ward_id
+        GROUP BY d.department_name
+      ) AS dept_stats ON true
       WHERE c.city_name = $1
         AND z.zone_name = $2
       GROUP BY c.city_name, z.zone_name, w.ward_name

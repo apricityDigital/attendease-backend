@@ -37,7 +37,7 @@ async function createSupervisorUser() {
     );
 
     if (existingSupervisor.rows.length > 0) {
-      console.log('⚠️  Supervisor user already exists:');
+      console.warn('Record exists, skipping');
       console.log('   Email:', supervisorData.email);
       console.log('   Password: supervisor123');
       return;
@@ -48,9 +48,15 @@ async function createSupervisorUser() {
     const result = await pool.query(
       `INSERT INTO users (name, emp_code, email, phone, role, password_hash) 
        VALUES ($1, $2, $3, $4, $5, $6) 
+       ON CONFLICT DO NOTHING
        RETURNING user_id, name, email, emp_code, role, created_at`,
       [supervisorData.name, supervisorData.emp_code, supervisorData.email, supervisorData.phone, supervisorData.role, hashedPassword]
     );
+
+    if (result.rows.length === 0) {
+      console.warn('Record exists, skipping');
+      return;
+    }
 
     console.log('✅ Supervisor user created successfully!');
     console.log('\n👤 Supervisor User Details:');
@@ -70,16 +76,11 @@ async function createSupervisorUser() {
     console.log('3. App will show supervisor interface');
 
   } catch (error) {
-    console.error('❌ Error creating supervisor user:', error);
-    
     if (error.code === '23505') {
-      console.log('⚠️  Email or Employee Code already exists in database');
-    } else if (error.code === 'ECONNREFUSED') {
-      console.log('⚠️  Database connection failed');
-      console.log('   Make sure PostgreSQL is running and database exists');
-    } else {
-      console.log('   Error details:', error.message);
+      console.warn('Record exists, skipping');
+      return;
     }
+    console.error('❌ Error creating supervisor user:', error);
   } finally {
     // Close database connection
     await pool.end();
