@@ -1,7 +1,16 @@
 const jwt = require("jsonwebtoken");
 
 const authenticateToken = (req, res, next) => {
-  const token = req.cookies.token || req.header("Authorization")?.split(" ")[1];
+  // Accept token from cookie, Authorization header, fallback headers, or query param
+  const bearer =
+    req.header("Authorization") || req.header("authorization") || "";
+  const headerToken = bearer.startsWith("Bearer ")
+    ? bearer.split(" ")[1]
+    : bearer || null;
+  const fallbackHeader = req.header("x-access-token") || req.header("token");
+  const queryToken = req.query?.token;
+  const token =
+    req.cookies.token || headerToken || fallbackHeader || queryToken;
 
   if (!token)
     return res.status(401).json({ error: "Access denied, no token provided" });
