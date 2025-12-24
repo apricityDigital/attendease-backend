@@ -89,7 +89,7 @@ const getLocationExpression = (locationType = "both") => {
   }
 };
 
-const buildAttendanceFilters = (query, { locationExpression }) => {
+const buildAttendanceFilters = (query, { locationExpression, cityScope }) => {
   const filters = [];
   const params = [];
   const metadata = {};
@@ -216,6 +216,17 @@ const buildAttendanceFilters = (query, { locationExpression }) => {
     metadata.has_punch_out = hasPunchOut;
   }
 
+  if (cityScope && !cityScope.all) {
+    if (!cityScope.ids || cityScope.ids.length === 0) {
+      filters.push("1 = 0");
+    } else {
+      params.push(cityScope.ids);
+      const placeholder = `$${params.length}`;
+      filters.push(`c.city_id = ANY(${placeholder})`);
+      metadata.city_scope = cityScope.ids;
+    }
+  }
+
   return {
     whereClause: filters.length ? `WHERE ${filters.join(" AND ")}` : "",
     params,
@@ -223,7 +234,7 @@ const buildAttendanceFilters = (query, { locationExpression }) => {
   };
 };
 
-const buildSupervisorSummaryFilters = (query) => {
+const buildSupervisorSummaryFilters = (query, { cityScope }) => {
   const filters = [];
   const params = [];
   const metadata = {};
@@ -267,6 +278,17 @@ const buildSupervisorSummaryFilters = (query) => {
     (ph) => `COALESCE(supervisor.name, '') ILIKE ${ph}`,
     "supervisor_name"
   );
+
+  if (cityScope && !cityScope.all) {
+    if (!cityScope.ids || cityScope.ids.length === 0) {
+      filters.push("1 = 0");
+    } else {
+      params.push(cityScope.ids);
+      const placeholder = `$${params.length}`;
+      filters.push(`c.city_id = ANY(${placeholder})`);
+      metadata.city_scope = cityScope.ids;
+    }
+  }
 
   return {
     whereClause: filters.length ? `WHERE ${filters.join(" AND ")}` : "",
@@ -567,7 +589,7 @@ const groupingConfigs = {
 };
 
 const createAttendanceDownloadHandler =
-  ({ pool, defaultFormat = "csv" } = {}) =>
+  ({ pool, defaultFormat = "csv", resolveCityScope } = {}) =>
   async (req, res) => {
     try {
       const format = (req.query.format || defaultFormat).toString().toLowerCase();
@@ -603,9 +625,12 @@ const createAttendanceDownloadHandler =
 
       const filterResult =
         requestedGrouping === "supervisor_summary"
-          ? buildSupervisorSummaryFilters(req.query)
+          ? buildSupervisorSummaryFilters(req.query, {
+              cityScope: resolveCityScope?.(req),
+            })
           : buildAttendanceFilters(req.query, {
               locationExpression,
+              cityScope: resolveCityScope?.(req),
             });
 
       const { whereClause, params, metadata } = filterResult;

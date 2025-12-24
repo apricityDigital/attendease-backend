@@ -3,6 +3,11 @@ const router = express.Router();
 const pool = require("../config/db");
 const authenticate = require("../middleware/authMiddleware");
 const { authorize } = require("../middleware/permissionMiddleware");
+const {
+  attachCityScope,
+  requireCityScope,
+  buildCityFilterClause,
+} = require("../middleware/cityScope");
 
 // Get all wards with zone names
 // router.get("/", async (req, res) => {
@@ -26,15 +31,21 @@ const { authorize } = require("../middleware/permissionMiddleware");
 router.get(
   "/",
   authenticate,
+  attachCityScope,
+  requireCityScope(),
   authorize("master", "view"),
   async (req, res) => {
   try {
+    const scope = req.cityScope || { all: false, ids: [] };
+    const cityFilter = buildCityFilterClause(scope, "c", []);
     const result = await pool.query(
       `SELECT w.ward_id, w.ward_name, z.zone_id, 
               z.zone_name, c.city_id, c.city_name
        FROM wards w
        JOIN zones z ON w.zone_id = z.zone_id
-       JOIN cities c ON z.city_id = c.city_id;`
+       JOIN cities c ON z.city_id = c.city_id
+       ${cityFilter.clause}`,
+      cityFilter.params
     );
 
     const groupedData = {};

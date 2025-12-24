@@ -4,6 +4,8 @@ const pool = require("../config/db");
 const {
   createAttendanceDownloadHandler,
 } = require("../utils/attendanceReportDownload");
+const authenticate = require("../middleware/authMiddleware");
+const { attachCityScope, requireCityScope } = require("../middleware/cityScope");
 
 // 🛠 IST Date Formatter
 const formatDateIST = (date = new Date()) => {
@@ -11,6 +13,8 @@ const formatDateIST = (date = new Date()) => {
     timeZone: "Asia/Kolkata",
   });
 };
+
+router.use(authenticate, attachCityScope, requireCityScope());
 
 // 🟢 Fetch attendance report for a specific date (current date or selected date)
 router.post("/", async (req, res) => {
@@ -58,7 +62,10 @@ router.post("/", async (req, res) => {
   }
 });
 
-const handleAttendanceDownload = createAttendanceDownloadHandler({ pool });
+const handleAttendanceDownload = createAttendanceDownloadHandler({
+  pool,
+  resolveCityScope: (req) => req.cityScope,
+});
 
 // Download attendance reports with flexible grouping & filters
 router.get("/download", handleAttendanceDownload);
@@ -73,6 +80,12 @@ router.get("/short-report", async (req, res) => {
   }
 
   const targetDate = date || formatDateIST();
+  const scope = req.cityScope || { all: false, ids: [] };
+  if (!scope.all && (!scope.ids || scope.ids.length === 0)) {
+    return res
+      .status(403)
+      .json({ error: "No city access assigned. Please contact admin." });
+  }
 
   try {
     const { rows } = await pool.query(
@@ -125,9 +138,12 @@ router.get("/short-report", async (req, res) => {
       ) AS dept_stats ON true
       WHERE c.city_name = $1
         AND z.zone_name = $2
+        ${scope.all ? "" : "AND c.city_id = ANY($4)"}
       GROUP BY c.city_name, z.zone_name, w.ward_name
       ORDER BY w.ward_name ASC`,
-      [cityName, zoneName, targetDate]
+      scope.all
+        ? [cityName, zoneName, targetDate]
+        : [cityName, zoneName, targetDate, scope.ids]
     );
 
     res.json(rows);

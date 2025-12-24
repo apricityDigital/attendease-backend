@@ -16,6 +16,7 @@ const supervisorRoutes = require("./supervisorRoutes");
 const assignedWardRoutes = require("./assignedWardRoutes");
 const adminRoutes = require("./adminRoutes");
 const rbacRoutes = require("./rbacRoutes");
+const whatsappRoutes = require("./whatsappRoutes");
 
 // Protected Route
 router.get("/protected", authenticateUser, (req, res) => {
@@ -34,5 +35,6 @@ router.use("/supervisor", supervisorRoutes);
 router.use("/assignedWardRoutes", assignedWardRoutes);
 router.use("/admin", adminRoutes);
 router.use("/rbac", rbacRoutes);
+router.use("/whatsapp", whatsappRoutes);
 
 module.exports = router;

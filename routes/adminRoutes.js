@@ -4,6 +4,7 @@ const authenticateUser = require("../middleware/authMiddleware");
 const {
   createAttendanceDownloadHandler,
 } = require("../utils/attendanceReportDownload");
+const { attachCityScope } = require("../middleware/cityScope");
 
 const router = express.Router();
 
@@ -20,6 +21,7 @@ const requireAdmin = (req, res, next) => {
 
 // Apply authentication and admin check to all routes
 router.use(authenticateUser);
+router.use(attachCityScope);
 router.use(requireAdmin);
 
 // ===== DASHBOARD ANALYTICS =====
@@ -508,6 +510,7 @@ router.get("/activity-logs", async (req, res) => {
 const handleAdminAttendanceDownload = createAttendanceDownloadHandler({
   pool,
   defaultFormat: "csv",
+  resolveCityScope: (req) => req.cityScope,
 });
 
 router.get("/export/attendance", handleAdminAttendanceDownload);
