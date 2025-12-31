@@ -25,6 +25,42 @@ const normalizeCityIds = (cityIds = []) => {
   return normalized;
 };
 
+const fetchCitiesFromAssignments = async (userId, includeCityMetadata = false) => {
+  if (!userId) {
+    return { ids: [], cities: [] };
+  }
+
+  const query = includeCityMetadata
+    ? `
+        SELECT DISTINCT c.city_id, c.city_name
+        FROM supervisor_ward sw
+        JOIN wards w ON w.ward_id = sw.ward_id
+        JOIN zones z ON z.zone_id = w.zone_id
+        JOIN cities c ON c.city_id = z.city_id
+        WHERE sw.supervisor_id = $1
+        ORDER BY c.city_name ASC
+      `
+    : `
+        SELECT DISTINCT c.city_id
+        FROM supervisor_ward sw
+        JOIN wards w ON w.ward_id = sw.ward_id
+        JOIN zones z ON z.zone_id = w.zone_id
+        JOIN cities c ON c.city_id = z.city_id
+        WHERE sw.supervisor_id = $1
+      `;
+
+  const { rows } = await pool.query(query, [userId]);
+  const ids = normalizeCityIds(rows.map((row) => row.city_id));
+
+  return {
+    ids,
+    cities: includeCityMetadata ? rows.map((row) => ({
+      city_id: row.city_id,
+      city_name: row.city_name,
+    })) : [],
+  };
+};
+
 const fetchUserCityAccess = async (user, options = {}) => {
   const userId =
     (typeof user === "object" && user !== null ? user.user_id : null) ||
@@ -33,6 +69,10 @@ const fetchUserCityAccess = async (user, options = {}) => {
   const role =
     (typeof user === "object" && user !== null ? user.role : null) || null;
   const includeCityMetadata = options.includeCities || options.withNames;
+  const allowAssignmentsFallback =
+    options.allowAssignmentsFallback === undefined
+      ? true
+      : Boolean(options.allowAssignmentsFallback);
 
   if (!userId) {
     return { all: false, ids: [], cities: [] };
@@ -50,7 +90,7 @@ const fetchUserCityAccess = async (user, options = {}) => {
   }
 
   const cacheKey = buildCacheKey(userId);
-  if (!includeCityMetadata && cityAccessCache.has(cacheKey)) {
+  if (!includeCityMetadata && allowAssignmentsFallback && cityAccessCache.has(cacheKey)) {
     return cityAccessCache.get(cacheKey);
   }
 
@@ -73,11 +113,27 @@ const fetchUserCityAccess = async (user, options = {}) => {
     includeCityMetadata ? rows.map((row) => row.city_id) : rows.map((row) => row.city_id)
   );
 
-  const payload = includeCityMetadata
+  let payload = includeCityMetadata
     ? { all: false, ids, cities: rows }
     : { all: false, ids };
 
-  if (!includeCityMetadata) {
+  if (
+    allowAssignmentsFallback &&
+    !payload.all &&
+    (!Array.isArray(payload.ids) || payload.ids.length === 0)
+  ) {
+    const assignmentScope = await fetchCitiesFromAssignments(
+      userId,
+      includeCityMetadata
+    );
+    if (assignmentScope.ids.length > 0) {
+      payload = includeCityMetadata
+        ? { all: false, ids: assignmentScope.ids, cities: assignmentScope.cities }
+        : { all: false, ids: assignmentScope.ids };
+    }
+  }
+
+  if (!includeCityMetadata && allowAssignmentsFallback) {
     cityAccessCache.set(cacheKey, payload);
   }
 
@@ -118,4 +174,5 @@ module.exports = {
   normalizeCityIds,
   syncUserCityAccess,
   invalidateCityAccessCache,
+  fetchCitiesFromAssignments,
 };
