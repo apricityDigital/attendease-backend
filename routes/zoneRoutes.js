@@ -22,6 +22,17 @@ router.get(
         whereClause = `WHERE c.city_id = ANY($${params.length})`;
       }
 
+      if (req.query.cityId) {
+        const ids = String(req.query.cityId)
+          .split(",")
+          .map((id) => Number(id.trim()))
+          .filter((id) => Number.isFinite(id));
+        if (ids.length > 0) {
+          params.push(ids);
+          whereClause += whereClause ? ` AND c.city_id = ANY($${params.length})` : `WHERE c.city_id = ANY($${params.length})`;
+        }
+      }
+
       const result = await pool.query(
         `
       SELECT z.zone_id, z.zone_name, c.city_id, c.city_name

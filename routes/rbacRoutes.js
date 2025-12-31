@@ -7,6 +7,7 @@ const {
   invalidatePermissionCache,
 } = require("../middleware/permissionMiddleware");
 const { syncUserCityAccess } = require("../utils/userCityAccess");
+const { syncUserZoneAccess } = require("../utils/userZoneAccess");
 
 const { ensureRbacSchema } = require("../utils/rbacSetup");
 
@@ -404,7 +405,9 @@ router.get("/users", authenticate, assertAdminOrPermission, async (req, res) => 
           'permissions',
           COALESCE(perms.permissions, '[]'::json),
           'cities',
-          COALESCE(city_access.cities, '[]'::json)
+          COALESCE(city_access.cities, '[]'::json),
+          'zones',
+          COALESCE(zone_access.zones, '[]'::json)
         ) AS access
       FROM users u
       LEFT JOIN LATERAL (
@@ -442,6 +445,20 @@ router.get("/users", authenticate, assertAdminOrPermission, async (req, res) => 
         JOIN cities c ON c.city_id = uca.city_id
         WHERE uca.user_id = u.user_id
       ) city_access ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT json_agg(
+          DISTINCT jsonb_build_object(
+            'zone_id', uza.zone_id,
+            'zone_name', z.zone_name,
+            'city_id', z.city_id,
+            'city_name', c.city_name
+          )
+        ) AS zones
+        FROM user_zone_access uza
+        JOIN zones z ON z.zone_id = uza.zone_id
+        JOIN cities c ON c.city_id = z.city_id
+        WHERE uza.user_id = u.user_id
+      ) zone_access ON TRUE
       ORDER BY u.user_id DESC
     `);
 
@@ -463,6 +480,7 @@ router.post("/users", authenticate, assertAdminOrPermission, async (req, res) =>
     roles,
     permissions,
     allowedCities,
+    allowedZones,
   } = req.body || {};
 
   if (!name || !email || !password) {
@@ -523,6 +541,10 @@ router.post("/users", authenticate, assertAdminOrPermission, async (req, res) =>
       await syncUserCityAccess(userId, allowedCities, req.user?.user_id);
     }
 
+    if (Array.isArray(allowedZones)) {
+      await syncUserZoneAccess(userId, allowedZones, req.user?.user_id);
+    }
+
     invalidatePermissionCache();
     res.status(201).json({ id: userId });
   } catch (error) {
@@ -547,6 +569,7 @@ router.put("/users/:userId", authenticate, assertAdminOrPermission, async (req, 
     roles,
     permissions,
     allowedCities,
+    allowedZones,
   } = req.body || {};
 
   try {
@@ -608,6 +631,15 @@ router.put("/users/:userId", authenticate, assertAdminOrPermission, async (req, 
         await syncUserCityAccess(
           userId,
           allowedCities,
+          req.user?.user_id,
+          client
+        );
+      }
+
+      if (Array.isArray(allowedZones)) {
+        await syncUserZoneAccess(
+          userId,
+          allowedZones,
           req.user?.user_id,
           client
         );

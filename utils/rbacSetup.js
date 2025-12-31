@@ -235,6 +235,21 @@ const runSchemaSetup = async () => {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS user_zone_access (
+        user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        zone_id INTEGER NOT NULL REFERENCES zones(zone_id) ON DELETE CASCADE,
+        granted_at TIMESTAMPTZ DEFAULT NOW(),
+        granted_by INTEGER,
+        PRIMARY KEY (user_id, zone_id)
+      )
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_user_zone_access_zone_id
+      ON user_zone_access (zone_id)
+    `);
+
+    await client.query(`
       ALTER TABLE users
       ADD COLUMN IF NOT EXISTS department VARCHAR(120)
     `);
